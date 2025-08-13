@@ -8,7 +8,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 import dash
-from dash import dcc, html, Input, Output, State, callback
+from dash import dcc, html, Input, Output, State, callback, ctx
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -76,13 +76,13 @@ def load_data_from_gsheet():
 
     ws_d = sh.worksheet(daily_name)
     vals_d = ws_d.get_all_values()
-    di = int(os.getenv("DAILY_HEADER_INDEX", "0"))
+    di = int(os.getenv("DAILY_HEADER_INDEX", "3"))  # ← 기본 3으로 수정 (0-base)
     headers_d = [norm(h) for h in vals_d[di]]
     df_daily_raw = pd.DataFrame(vals_d[di+1:], columns=headers_d)
 
     ws_m = sh.worksheet(monthly_name)
     vals_m = ws_m.get_all_values()
-    mi = int(os.getenv("MONTHLY_HEADER_INDEX", "1"))
+    mi = int(os.getenv("MONTHLY_HEADER_INDEX", "2"))  # ← 기본 2로 수정 (0-base)
     headers_m = [norm(h) for h in vals_m[mi]]
     df_monthly_raw = pd.DataFrame(vals_m[mi+1:], columns=headers_m)
     return df_daily_raw, df_monthly_raw
@@ -101,7 +101,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
     d = d.rename(columns={c: norm(c) for c in d.columns})
 
     col_date = next((c for c in d.columns if c in [
-                    '날짜', '날짜(년월일)', '일자', '날']), d.columns[0])
+                    '날짜', '날짜(년월일)', '일자', '날', '날짜날짜']), d.columns[0])
     col_cnt = next((c for c in d.columns if c in [
                    '총발주종수', '총발주건수', '총발주건', '종수']), None)
     col_total = next((c for c in d.columns if c in [
@@ -113,6 +113,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
     col_shipt = next((c for c in d.columns if c in ['최종출고']), None)
     col_ships = next((c for c in d.columns if c in ['출고부수']), None)
 
+    # "2025년" 같은 연도 표지 행 처리
     d['__year_header__'] = d[col_date].astype(str).str.extract(
         r'(^\s*(\d{4})\s*년\s*$)', expand=True)[1]
     d['__year_header__'] = d['__year_header__'].ffill()
@@ -343,46 +344,31 @@ def figure_weekly_today_based(df_daily: pd.DataFrame) -> go.Figure:
                       for d in last_week_dates]
 
     fig = go.Figure()
+    # 막대: 페이지(좌측 y)
+    fig.add_trace(go.Bar(x=x_week, y=y_last_bw,   name='지난주 흑백페이지',  opacity=0.45,
+                         hovertemplate="%{x} (%{customdata})<br>지난주 흑백: %{y:,}p<extra></extra>",
+                         customdata=last_dates_str, yaxis='y'))
+    fig.add_trace(go.Bar(x=x_week, y=y_last_color, name='지난주 컬러페이지',  opacity=0.45,
+                         hovertemplate="%{x} (%{customdata})<br>지난주 컬러: %{y:,}p<extra></extra>",
+                         customdata=last_dates_str, yaxis='y'))
+    fig.add_trace(go.Bar(x=x_week, y=y_this_bw,   name='이번주 흑백페이지',
+                         hovertemplate="%{x} (%{customdata})<br>이번주 흑백: %{y:,}p<extra></extra>",
+                         customdata=this_dates_str, yaxis='y'))
+    fig.add_trace(go.Bar(x=x_week, y=y_this_color, name='이번주 컬러페이지',
+                         hovertemplate="%{x} (%{customdata})<br>이번주 컬러: %{y:,}p<extra></extra>",
+                         customdata=this_dates_str, yaxis='y'))
 
-    # --- 막대: 페이지(좌측 y) ---
-    fig.add_trace(go.Bar(
-        x=x_week, y=y_last_bw, name='지난주 흑백페이지', opacity=0.45,
-        hovertemplate="%{x} (%{customdata})<br>지난주 흑백: %{y:,}p<extra></extra>",
-        customdata=last_dates_str, yaxis='y'
-    ))
-    fig.add_trace(go.Bar(
-        x=x_week, y=y_last_color, name='지난주 컬러페이지', opacity=0.45,
-        hovertemplate="%{x} (%{customdata})<br>지난주 컬러: %{y:,}p<extra></extra>",
-        customdata=last_dates_str, yaxis='y'
-    ))
-    fig.add_trace(go.Bar(
-        x=x_week, y=y_this_bw, name='이번주 흑백페이지',
-        hovertemplate="%{x} (%{customdata})<br>이번주 흑백: %{y:,}p<extra></extra>",
-        customdata=this_dates_str, yaxis='y'
-    ))
-    fig.add_trace(go.Bar(
-        x=x_week, y=y_this_color, name='이번주 컬러페이지',
-        hovertemplate="%{x} (%{customdata})<br>이번주 컬러: %{y:,}p<extra></extra>",
-        customdata=this_dates_str, yaxis='y'
-    ))
-
-    # --- 선: 발주부수(우측 y2) ---
-    fig.add_trace(go.Scatter(
-        x=x_week, y=y_last_qty, mode='lines+markers+text', name='지난 주 발주부수',
-        line=dict(width=2, dash='dot'),
-        customdata=last_dates_str,
-        hovertemplate="%{customdata}<br>지난 주: %{y:,}부<extra></extra>",
-        text=[f"{v:,}" if v else "" for v in y_last_qty], textposition='top center', textfont={'size': 10},
-        yaxis='y2'
-    ))
-    fig.add_trace(go.Scatter(
-        x=x_week, y=y_this_qty, mode='lines+markers+text', name='이번 주 발주부수',
-        line=dict(width=3),
-        customdata=this_dates_str,
-        hovertemplate="%{customdata}<br>이번 주: %{y:,}부<extra></extra>",
-        text=[f"{v:,}" if v else "" for v in y_this_qty], textposition='top center', textfont={'size': 10},
-        yaxis='y2'
-    ))
+    # 선: 발주부수(우측 y2)
+    fig.add_trace(go.Scatter(x=x_week, y=y_last_qty, mode='lines+markers+text', name='지난 주 발주부수',
+                             line=dict(width=2, dash='dot'), customdata=last_dates_str,
+                             hovertemplate="%{customdata}<br>지난 주: %{y:,}부<extra></extra>",
+                             text=[f"{v:,}" if v else "" for v in y_last_qty],
+                             textposition='top center', textfont={'size': 10}, yaxis='y2'))
+    fig.add_trace(go.Scatter(x=x_week, y=y_this_qty, mode='lines+markers+text', name='이번 주 발주부수',
+                             line=dict(width=3), customdata=this_dates_str,
+                             hovertemplate="%{customdata}<br>이번 주: %{y:,}부<extra></extra>",
+                             text=[f"{v:,}" if v else "" for v in y_this_qty],
+                             textposition='top center', textfont={'size': 10}, yaxis='y2'))
 
     fig.update_layout(
         title=f'주간 발주량 비교 (기준일: {now.strftime("%Y-%m-%d")})',
@@ -419,48 +405,31 @@ def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None) 
                       for d in prev_week_days]
 
     fig = go.Figure()
+    fig.add_trace(go.Bar(x=x_week, y=y_last_bw,   name='지난주 흑백페이지',  opacity=0.45,
+                         customdata=last_dates_str,
+                         hovertemplate="%{x} (%{customdata})<br>지난주 흑백: %{y:,}p<extra></extra>", yaxis='y'))
+    fig.add_trace(go.Bar(x=x_week, y=y_last_color, name='지난주 컬러페이지',  opacity=0.45,
+                         customdata=last_dates_str,
+                         hovertemplate="%{x} (%{customdata})<br>지난주 컬러: %{y:,}p<extra></extra>", yaxis='y'))
+    fig.add_trace(go.Bar(x=x_week, y=y_this_bw,   name='이번주 흑백페이지',
+                         customdata=this_dates_str,
+                         hovertemplate="%{x} (%{customdata})<br>이번주 흑백: %{y:,}p<extra></extra>", yaxis='y'))
+    fig.add_trace(go.Bar(x=x_week, y=y_this_color, name='이번주 컬러페이지',
+                         customdata=this_dates_str,
+                         hovertemplate="%{x} (%{customdata})<br>이번주 컬러: %{y:,}p<extra></extra>", yaxis='y'))
 
-    fig.add_trace(go.Bar(
-        x=x_week, y=y_last_bw, name='지난주 흑백페이지', opacity=0.45,
-        customdata=last_dates_str,
-        hovertemplate="%{x} (%{customdata})<br>지난주 흑백: %{y:,}p<extra></extra>",
-        yaxis='y'
-    ))
-    fig.add_trace(go.Bar(
-        x=x_week, y=y_last_color, name='지난주 컬러페이지', opacity=0.45,
-        customdata=last_dates_str,
-        hovertemplate="%{x} (%{customdata})<br>지난주 컬러: %{y:,}p<extra></extra>",
-        yaxis='y'
-    ))
-    fig.add_trace(go.Bar(
-        x=x_week, y=y_this_bw, name='이번주 흑백페이지',
-        customdata=this_dates_str,
-        hovertemplate="%{x} (%{customdata})<br>이번주 흑백: %{y:,}p<extra></extra>",
-        yaxis='y'
-    ))
-    fig.add_trace(go.Bar(
-        x=x_week, y=y_this_color, name='이번주 컬러페이지',
-        customdata=this_dates_str,
-        hovertemplate="%{x} (%{customdata})<br>이번주 컬러: %{y:,}p<extra></extra>",
-        yaxis='y'
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=x_week, y=y_last_qty, mode='lines+markers+text', name='지난 주 발주부수',
-        line=dict(width=2, dash='dot'),
-        customdata=last_dates_str,
-        hovertemplate="%{customdata}<br>지난 주: %{y:,}부<extra></extra>",
-        text=[f"{v:,}" if v else "" for v in y_last_qty], textposition='top center', textfont={'size': 10},
-        yaxis='y2'
-    ))
-    fig.add_trace(go.Scatter(
-        x=x_week, y=y_this_qty, mode='lines+markers+text', name='이번 주 발주부수',
-        line=dict(width=3),
-        customdata=this_dates_str,
-        hovertemplate="%{customdata}<br>이번 주: %{y:,}부<extra></extra>",
-        text=[f"{v:,}" if v else "" for v in y_this_qty], textposition='top center', textfont={'size': 10},
-        yaxis='y2'
-    ))
+    fig.add_trace(go.Scatter(x=x_week, y=y_last_qty, mode='lines+markers+text', name='지난 주 발주부수',
+                             line=dict(width=2, dash='dot'),
+                             customdata=last_dates_str,
+                             hovertemplate="%{customdata}<br>지난 주: %{y:,}부<extra></extra>",
+                             text=[f"{v:,}" if v else "" for v in y_last_qty],
+                             textposition='top center', textfont={'size': 10}, yaxis='y2'))
+    fig.add_trace(go.Scatter(x=x_week, y=y_this_qty, mode='lines+markers+text', name='이번 주 발주부수',
+                             line=dict(width=3),
+                             customdata=this_dates_str,
+                             hovertemplate="%{customdata}<br>이번 주: %{y:,}부<extra></extra>",
+                             text=[f"{v:,}" if v else "" for v in y_this_qty],
+                             textposition='top center', textfont={'size': 10}, yaxis='y2'))
 
     title_range = f"{week_days[0].strftime('%Y-%m-%d')} ~ {week_days[-1].strftime('%Y-%m-%d')}"
     fig.update_layout(
@@ -498,8 +467,7 @@ def yoy_line_value_bar_rate(d: pd.DataFrame, value_col: str, title: str, baselin
     if d.empty:
         return go.Figure()
     d = d.copy()
-    d = d[d['연도'] <= baseline_year]
-    d = d.sort_values(['연도', '월번호'])
+    d = d[d['연도'] <= baseline_year].sort_values(['연도', '월번호'])
     if value_col not in d.columns:
         d[value_col] = 0
     d['prev_year'] = d.groupby('월번호')[value_col].shift(1)
@@ -509,22 +477,16 @@ def yoy_line_value_bar_rate(d: pd.DataFrame, value_col: str, title: str, baselin
     fig = go.Figure()
     for y, sub in d.groupby('연도'):
         fig.add_trace(go.Scatter(
-            x=sub['월번호'], y=sub[value_col], mode='lines+markers', name=f'{y}년 ({value_col})'
-        ))
+            x=sub['월번호'], y=sub[value_col], mode='lines+markers', name=f'{y}년 ({value_col})'))
     base = d[d['연도'] == baseline_year]
-    fig.add_trace(go.Bar(
-        x=base['월번호'], y=base['YoY%'], name=f'{baseline_year} YoY%',
-        yaxis='y2', opacity=0.6,
-        hovertemplate="증감율: %{y:.1f}%<extra></extra>"
-    ))
-    fig.update_layout(
-        title=title, xaxis_title='', yaxis_title=value_col,
-        yaxis2=dict(title='YoY %', overlaying='y',
-                    side='right', showgrid=False),
-        template='plotly_white', height=420,
-        margin=dict(l=20, r=20, t=40, b=20),
-        legend=dict(orientation='h', x=1, xanchor='right', y=1.12)
-    )
+    fig.add_trace(go.Bar(x=base['월번호'], y=base['YoY%'], name=f'{baseline_year} YoY%', yaxis='y2', opacity=0.6,
+                         hovertemplate="증감율: %{y:.1f}%<extra></extra>"))
+    fig.update_layout(title=title, xaxis_title='', yaxis_title=value_col,
+                      yaxis2=dict(title='YoY %', overlaying='y',
+                                  side='right', showgrid=False),
+                      template='plotly_white', height=420,
+                      margin=dict(l=20, r=20, t=40, b=20),
+                      legend=dict(orientation='h', x=1, xanchor='right', y=1.12))
     fig.update_xaxes(dtick=1)
     return fig
 
@@ -601,10 +563,8 @@ def badge(text, color="#2b8a3e", tip=None):
     return html.Span(
         text,
         title=tip,
-        style={
-            'display': 'inline-block', 'padding': '4px 8px', 'borderRadius': '999px',
-            'background': color, 'color': 'white', 'fontSize': '0.8rem', 'fontWeight': '700', 'cursor': 'help'
-        }
+        style={'display': 'inline-block', 'padding': '4px 8px', 'borderRadius': '999px',
+               'background': color, 'color': 'white', 'fontSize': '0.8rem', 'fontWeight': '700', 'cursor': 'help'}
     )
 
 
@@ -623,13 +583,11 @@ def kpi_card(title, value, subtitle):
 
 def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int):
     tot, avg, days, bw, color = compute_kpis(df_daily, year)
-
     row1 = html.Div(style={'display': 'flex', 'gap': '12px', 'flexWrap': 'wrap', 'marginBottom': '8px'}, children=[
         kpi_card(f"{year}년 총 발주량", f"{tot:,}", "Total Orders"),
         kpi_card(f"{year}년 일 평균 발주량", f"{avg:,}", "Avg / Working Day"),
         kpi_card(f"{year}년 총 발주 일수", f"{days:,}일", "Working Days Count"),
     ])
-
     row2 = html.Div(style={'display': 'flex', 'gap': '12px', 'flexWrap': 'wrap', 'marginBottom': '6px'}, children=[
         kpi_card(f"{year}년 흑백 페이지 합계", f"{bw:,}", "BW Pages (Daily sum)"),
         kpi_card(f"{year}년 컬러 페이지 합계", f"{color:,}",
@@ -640,41 +598,30 @@ def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int
     badges = []
     if prog['ytd_ly']:
         ytd_vs_ly = prog['ytd_curr'] / prog['ytd_ly'] * 100
-        tip_ytd = (
-            f"올해 YTD(1/1~{prog['today']:%Y-%m-%d}) {prog['ytd_curr']:,} ÷ "
-            f"작년 YTD(1/1~{prog['same_date_ly']:%Y-%m-%d}) {prog['ytd_ly']:,} × 100"
-        )
+        tip_ytd = (f"올해 YTD(1/1~{prog['today']:%Y-%m-%d}) {prog['ytd_curr']:,} ÷ "
+                   f"작년 YTD(1/1~{prog['same_date_ly']:%Y-%m-%d}) {prog['ytd_ly']:,} × 100")
         badges.append(
             badge(f"YTD vs 작년 동기간: {ytd_vs_ly:.1f}%", "#0b7285", tip=tip_ytd))
 
     if prog['progress_vs_biz'] is not None:
         color_biz = "#2b8a3e" if prog['progress_vs_biz'] >= 100 else "#d9480f"
-        tip_biz = (
-            f"올해 YTD {prog['ytd_curr']:,} ÷ "
-            f"(작년 연간 {prog['last_year_total']:,} × 영업일 경과율 {prog['ratio_biz']*100:.1f}% "
-            f"[{prog['elapsed_biz_days']}/{prog['total_biz_days']}일]) × 100"
-        )
+        tip_biz = (f"올해 YTD {prog['ytd_curr']:,} ÷ "
+                   f"(작년 연간 {prog['last_year_total']:,} × 영업일 경과율 {prog['ratio_biz']*100:.1f}% "
+                   f"[{prog['elapsed_biz_days']}/{prog['total_biz_days']}일]) × 100")
         badges.append(badge(
             f"경과율(영업일) 대비 달성도: {prog['progress_vs_biz']:.1f}%", color_biz, tip=tip_biz))
 
     if prog['progress_vs_seasonal'] is not None:
         color_season = "#2b8a3e" if prog['progress_vs_seasonal'] >= 100 else "#d9480f"
-        tip_season = (
-            f"올해 YTD {prog['ytd_curr']:,} ÷ "
-            f"(작년 연간 {prog['last_year_total']:,} × 월별 가중 누적비중 {prog['seasonal_share_to_date']*100:.1f}%) × 100"
-        )
+        tip_season = (f"올해 YTD {prog['ytd_curr']:,} ÷ "
+                      f"(작년 연간 {prog['last_year_total']:,} × 월별 가중 누적비중 {prog['seasonal_share_to_date']*100:.1f}%) × 100")
         badges.append(badge(
             f"월별 가중 pace 대비 달성도: {prog['progress_vs_seasonal']:.1f}%", color_season, tip=tip_season))
 
-    tip_ratio = (
-        f"올해 1/1~{prog['today']:%Y-%m-%d} 영업일 {prog['elapsed_biz_days']}/{prog['total_biz_days']}일 (주말·공휴일 제외)")
-    badges.append(
-        badge(f"영업일 경과율: {prog['ratio_biz']*100:.1f}%", "#6c757d", tip=tip_ratio))
-
-    tip_share = ("작년 월별 연간 비중 누적치 = 전월까지 100% + (이번 달 비중 × 이번 달 영업일 진행률)")
-    badges.append(badge(
-        f"월별 가중 누적비중: {prog['seasonal_share_to_date']*100:.1f}%", "#6c757d", tip=tip_share))
-
+    badges.append(badge(f"영업일 경과율: {prog['ratio_biz']*100:.1f}%", "#6c757d",
+                        tip=f"올해 1/1~{prog['today']:%Y-%m-%d} 영업일 {prog['elapsed_biz_days']}/{prog['total_biz_days']}일 (주말·공휴일 제외)"))
+    badges.append(badge(f"월별 가중 누적비중: {prog['seasonal_share_to_date']*100:.1f}%", "#6c757d",
+                        tip="작년 월별 연간 비중 누적치 = 전월까지 100% + (이번 달 비중 × 이번 달 영업일 진행률)"))
     row3 = html.Div(style={'display': 'flex', 'gap': '8px', 'flexWrap': 'wrap',
                     'alignItems': 'center', 'margin': '4px 2px 0'}, children=badges)
     return html.Div(children=[row1, row2, row3])
@@ -707,7 +654,6 @@ def build_today_panel(df_daily: pd.DataFrame):
             bind_time = (str(r.get('예상제본시간', '-')) or '-')
             last_ship = (str(r.get('최종출고', '-')) or '-')
             ship_qty = fmt_int(r.get('출고부수', 0))
-
             grid = html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr 1fr', 'rowGap': '6px', 'columnGap': '8px'}, children=[
                 html.Div("총 발주 종수", style={'color': '#666'}), html.Div(
                     total_kinds, style={'textAlign': 'right', 'fontWeight': '700'}),
@@ -718,7 +664,7 @@ def build_today_panel(df_daily: pd.DataFrame):
                 html.Div("컬러 페이지",  style={'color': '#666'}), html.Div(
                     color_pages, style={'textAlign': 'right', 'fontWeight': '700'}),
                 html.Div("예상 제본 시간", style={'color': '#666'}), html.Div(
-                    bind_time, style={'textAlign': 'right', 'fontWeight': '700'}),
+                    bind_time,  style={'textAlign': 'right', 'fontWeight': '700'}),
                 html.Div("최종 출고",    style={'color': '#666'}), html.Div(
                     last_ship,   style={'textAlign': 'right', 'fontWeight': '700'}),
                 html.Div("출고 부수",    style={'color': '#666'}), html.Div(
@@ -731,7 +677,6 @@ def build_today_panel(df_daily: pd.DataFrame):
         html.Button("닫기 ✕", id='btn-close-today', n_clicks=0,
                     style={'background': '#f1f3f5', 'border': 'none', 'padding': '6px 10px', 'borderRadius': '8px', 'cursor': 'pointer', 'float': 'right'})
     ])
-
     return html.Div(style={
         'position': 'fixed', 'top': '80px', 'right': '16px', 'width': '310px', 'zIndex': '999',
         'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
@@ -782,10 +727,14 @@ def forecast_cards_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year
 # -----------------------------------------------------------------------------
 external_stylesheets = [
     {"href": "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css", "rel": "stylesheet"}]
-app = dash.Dash(__name__, title="발주량 분석 대시보드",
-                meta_tags=[{"name": "viewport",
-                            "content": "width=device-width, initial-scale=1"}],
-                external_stylesheets=external_stylesheets)
+app = dash.Dash(
+    __name__,
+    title="발주량 분석 대시보드",
+    meta_tags=[{"name": "viewport",
+                "content": "width=device-width, initial-scale=1"}],
+    external_stylesheets=external_stylesheets,
+    suppress_callback_exceptions=True   # ★ 동적 컴포넌트 콜백 허용
+)
 server = app.server
 CURRENT_YEAR = datetime.now(KST).year
 
@@ -794,7 +743,7 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
     dcc.Interval(id='init', interval=250, n_intervals=0, max_intervals=1),
     dcc.Interval(id='today-refresh', interval=120*1000, n_intervals=0),
 
-    # 상태 저장소 (보임/숨김 + 메모)
+    # 상태 저장소
     dcc.Store(id='today-visible', storage_type='session', data=True),
     dcc.Store(id='memo-visible', storage_type='local', data=False),
     dcc.Store(id='memo-store', storage_type='local', data=""),
@@ -874,7 +823,7 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
                        'background': '#495057', 'color': '#fff', 'border': 'none', 'borderRadius': '999px',
                        'padding': '10px 14px', 'boxShadow': '0 6px 16px rgba(0,0,0,0.2)', 'cursor': 'pointer'}),
 
-    # 메모 패널
+    # 메모 패널 (초기 숨김)
     html.Div(id='memo-panel', children=[
         html.Div([
             html.Div("메모", style={'fontWeight': '800', 'fontSize': '1.05rem'}),
@@ -894,8 +843,7 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
     ], style={'position': 'fixed', 'top': '80px', 'left': '16px', 'width': '320px', 'zIndex': '998',
               'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
               'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '12px 14px',
-              'boxShadow': '0 10px 22px rgba(0,0,0,0.12)'}),
-
+              'boxShadow': '0 10px 22px rgba(0,0,0,0.12)', 'display': 'none'}),
 ])
 
 # -----------------------------------------------------------------------------
@@ -1079,8 +1027,7 @@ def refresh_today_panel(_n):
     prevent_initial_call=True
 )
 def toggle_today(open_clicks, close_clicks, visible):
-    ctx = dash.callback_context
-    trig = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+    trig = ctx.triggered_id
     if trig == 'btn-open-today':
         return True
     if trig == 'btn-close-today':
@@ -1096,9 +1043,9 @@ def toggle_today(open_clicks, close_clicks, visible):
 )
 def showhide_today_panel(visible, open_btn_style):
     panel_style = {} if visible else {'display': 'none'}
-    btn_style = dict(open_btn_style or {})
-    btn_style['display'] = 'none' if visible else 'inline-block'
-    return panel_style, btn_style
+    btn = dict(open_btn_style or {})
+    btn['display'] = 'none' if visible else 'inline-block'
+    return panel_style, btn
 
 # ===== 메모: 로드/저장/지우기 + 보이기/숨기기 =====
 
@@ -1144,8 +1091,7 @@ def clear_memo(_n):
     prevent_initial_call=True
 )
 def toggle_memo(open_clicks, close_clicks, visible):
-    ctx = dash.callback_context
-    trig = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+    trig = ctx.triggered_id
     if trig == 'btn-open-memo':
         return True
     if trig == 'btn-close-memo':
