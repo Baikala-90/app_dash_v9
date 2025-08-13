@@ -1,0 +1,137 @@
+
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>발주량 분석 대시보드 (Flask)</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+      :root{ --card-bg:#fff; --shadow:0 4px 16px rgba(0,0,0,.08); --radius:14px; --gap:14px; }
+      body{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", "Malgun Gothic", sans-serif; background:#f6f7fb; margin:0; }
+      .wrap{ max-width:1200px; margin:0 auto; padding:18px; }
+      h1{ margin:.2rem 0 .4rem; font-size:1.6rem; }
+      .sub{ color:#666; margin-bottom:8px; }
+      .toolbar{ display:flex; gap:10px; align-items:center; margin:6px 0 14px; }
+      select{ padding:8px 10px; border-radius:10px; border:1px solid #ddd; background:#fff; }
+      .grid-kpi{ display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:var(--gap); margin:12px 0; }
+      .card{ background:var(--card-bg); border-radius:var(--radius); box-shadow:var(--shadow); padding:14px; }
+      .kpi h4{ margin:.2rem 0; color:#555; font-weight:600; }
+      .kpi .big{ font-size:2rem; margin:.1rem 0; }
+      details{ margin:6px 0 18px; }
+      summary{ cursor:pointer; font-weight:600; }
+      table{ width:100%; border-collapse:collapse; font-size:.95rem; }
+      th,td{ padding:8px 10px; border-bottom:1px solid #eee; text-align:right; }
+      th:first-child, td:first-child{ text-align:left; }
+      .grid{ display:grid; gap:var(--gap); }
+      .grid-1{ grid-template-columns: 1fr; }
+      .grid-2{ grid-template-columns: 1fr; }
+      @media (min-width: 1024px){ .grid-2{ grid-template-columns: 1fr 1fr; } }
+      footer{ color:#888; text-align:center; margin:20px 0 8px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>발주량 분석 대시보드 (Flask)</h1>
+      <div class="sub">2021~현재 데이터 기준 • 주간/월별/YoY 지표</div>
+
+      <div class="toolbar">
+        <form method="get" action="/">
+          <label for="year">KPI 연도 선택:</label>
+          <select id="year" name="year" onchange="this.form.submit()">
+            {% for y in years_options %}
+              <option value="{{y}}" {% if y==selected_year %}selected{% endif %}>{{y}}년</option>
+            {% endfor %}
+          </select>
+        </form>
+      </div>
+
+      <div class="grid-kpi">
+        <div class="card kpi">
+          <h4>{{selected_year}}년 총 발주량</h4>
+          <div class="big">{{kpi_total}}</div>
+        </div>
+        <div class="card kpi">
+          <h4>{{selected_year}}년 일 평균 발주량</h4>
+          <div class="big">{{kpi_avg}}</div>
+        </div>
+        <div class="card kpi">
+          <h4>{{selected_year}}년 총 발주 일수</h4>
+          <div class="big">{{kpi_days}}일</div>
+        </div>
+      </div>
+
+      <details class="card">
+        <summary>지난 연도 KPI 펼치기 / 접기</summary>
+        <div style="margin-top:8px;">
+          <table>
+            <thead>
+              <tr><th>연도</th><th>총 발주량</th><th>일 평균 발주량</th><th>총 발주 일수</th></tr>
+            </thead>
+            <tbody>
+              {% for r in prev_rows %}
+              <tr>
+                <td>{{r.year}}년</td>
+                <td>{{r.total}}</td>
+                <td>{{r.avg}}</td>
+                <td>{{r.days}}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+
+      <div class="grid grid-1">
+        <div class="card">
+          <h3>주간 발주량 비교 (오늘 기준 5영업일 + 지난주 동일 요일)</h3>
+          <div id="fig-week"></div>
+        </div>
+      </div>
+
+      <div class="grid grid-1">
+        <div class="card">
+          <h3>월별 발주량 (1~12월, 2022~현재)</h3>
+          <div id="fig-months"></div>
+        </div>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <h3>월별 일평균 발주량 + YoY%</h3>
+          <div id="fig-avg"></div>
+        </div>
+        <div class="card">
+          <h3>월 총 발주량 + YoY%</h3>
+          <div id="fig-total"></div>
+        </div>
+        <div class="card">
+          <h3>월별 흑백 페이지 + YoY%</h3>
+          <div id="fig-bw"></div>
+        </div>
+        <div class="card">
+          <h3>월별 컬러 페이지 + YoY%</h3>
+          <div id="fig-color"></div>
+        </div>
+      </div>
+
+      <footer>© 2025 발주량 분석 대시보드</footer>
+    </div>
+
+    <script>
+      const fig_week = {{ fig_week_json | safe }};
+      const fig_months = {{ fig_months_json | safe }};
+      const fig_avg = {{ fig_avg_json | safe }};
+      const fig_total = {{ fig_total_json | safe }};
+      const fig_bw = {{ fig_bw_json | safe }};
+      const fig_color = {{ fig_color_json | safe }};
+
+      Plotly.newPlot('fig-week', fig_week.data, fig_week.layout, {responsive:true});
+      Plotly.newPlot('fig-months', fig_months.data, fig_months.layout, {responsive:true});
+      Plotly.newPlot('fig-avg', fig_avg.data, fig_avg.layout, {responsive:true});
+      Plotly.newPlot('fig-total', fig_total.data, fig_total.layout, {responsive:true});
+      Plotly.newPlot('fig-bw', fig_bw.data, fig_bw.layout, {responsive:true});
+      Plotly.newPlot('fig-color', fig_color.data, fig_color.layout, {responsive:true});
+    </script>
+  </body>
+</html>

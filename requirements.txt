@@ -1,0 +1,9 @@
+dash==2.16.1
+pandas
+plotly
+gspread
+oauth2client
+python-dotenv
+pytz
+holidays
+gunicorn
