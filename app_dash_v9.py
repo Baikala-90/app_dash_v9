@@ -28,7 +28,10 @@ def norm(s: str) -> str:
 
 
 def find_credentials_path():
-    for p in [os.getenv("GOOGLE_APPLICATION_CREDENTIALS"), os.getenv("GSPREAD_CREDENTIALS"), "credentials.json", "service_account.json"]:
+    # env 우선
+    for p in [os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+              os.getenv("GSPREAD_CREDENTIALS"),
+              "credentials.json", "service_account.json"]:
         if p and os.path.exists(p):
             print(f"[INFO] Using credentials: {p}")
             return p
@@ -44,7 +47,7 @@ def open_sheet():
 
     url = os.getenv("SPREADSHEET_URL", "").strip()
     if not url:
-        raise EnvironmentError("SPREADSHEET_URL이 .env에 없습니다.")
+        raise EnvironmentError("SPREADSHEET_URL이 .env/환경변수에 없습니다.")
     return client.open_by_url(url)
 
 # -----------------------------
@@ -94,6 +97,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
     col_bw = next((c for c in d.columns if '흑백' in c), None)
     col_color = next((c for c in d.columns if ('컬러' in c or '칼라' in c)), None)
 
+    # 2025년 같은 헤더행을 연도 표지로 사용
     d['__year_header__'] = d[col_date].astype(str).str.extract(
         r'(^\s*(\d{4})\s*년\s*$)', expand=True)[1]
     d['__year_header__'] = d['__year_header__'].ffill()
@@ -184,7 +188,7 @@ def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def kr_holidays_for_year(year: int):
-    """Return a set of KR public holidays for the year. Falls back to empty set if 'holidays' not installed."""
+    """한국 공휴일 집합 반환. 'holidays' 패키지가 없으면 주말만 제외로 폴백."""
     try:
         import holidays  # type: ignore
         kr = holidays.KR(years=year)
@@ -195,7 +199,6 @@ def kr_holidays_for_year(year: int):
 
 
 def business_days_in_range(start_d: date, end_d: date, holiday_set: set):
-    """Count business days between two dates inclusive, excluding weekends and holidays."""
     if end_d < start_d:
         return 0
     cnt = 0
@@ -207,19 +210,7 @@ def business_days_in_range(start_d: date, end_d: date, holiday_set: set):
     return cnt
 
 
-def business_day_ratio_for_year(today: date) -> float:
-    """Elapsed business days / full-year business days (Mon-Fri minus KR holidays)."""
-    year = today.year
-    start = date(year, 1, 1)
-    end_year = date(year, 12, 31)
-    hol = kr_holidays_for_year(year)
-    elapsed = business_days_in_range(start, today, hol)
-    total = business_days_in_range(start, end_year, hol)
-    return (elapsed / total) if total else 0.0
-
-
 def business_day_ratio_for_month(today: date) -> float:
-    """Elapsed business days within the current month (for partial-month weighting)."""
     year, month = today.year, today.month
     start = date(year, month, 1)
     last_day = calendar.monthrange(year, month)[1]
@@ -242,7 +233,6 @@ def total_business_days_in_year(year: int) -> int:
 
 
 def monthly_share_series(df_monthly: pd.DataFrame, year: int, value_col: str) -> pd.Series:
-    """Return 12-length monthly share for given year & metric. If total=0 or missing, returns zeros."""
     d = df_monthly[df_monthly['연도'] == year]
     if d.empty or value_col not in d.columns:
         return pd.Series([0.0]*12, index=range(1, 13))
@@ -255,15 +245,12 @@ def monthly_share_series(df_monthly: pd.DataFrame, year: int, value_col: str) ->
 
 
 def seasonal_cum_share_to_date(df_monthly: pd.DataFrame, value_col: str, last_year: int, today: date) -> float:
-    """Cumulative expected share up to 'today' using last year's monthly distribution with partial current month by biz-day ratio."""
     shares = monthly_share_series(
         df_monthly, last_year, value_col)  # index 1..12
     if shares.sum() == 0:
         return 0.0
     m = today.month
-    # full months before current month
     full_share = shares.loc[1:m-1].sum() if m > 1 else 0.0
-    # partial current month by business-day ratio
     part = shares.loc[m] * business_day_ratio_for_month(today)
     return float(full_share + part)
 
@@ -489,33 +476,33 @@ def safe_same_date_last_year(today: date) -> date:
 
 def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int):
     """
-    Returns dict with:
-      - ytd_curr
-      - ytd_ly
-      - last_year_total
-      - ratio_biz (영업일 경과율, 0~1)
-      - progress_vs_biz (%)
-      - seasonal_share_to_date (0~1)
-      - progress_vs_seasonal (%)
+    Returns dict:
+      ytd_curr, ytd_ly, last_year_total,
+      ratio_biz, progress_vs_biz, seasonal_share_to_date, progress_vs_seasonal,
+      elapsed_biz_days, total_biz_days, today, same_date_ly
     """
     today = datetime.now(KST).date()
-    # YTD current
+    ly = year - 1
+
+    # YTD
     ytd_curr = df_daily[(df_daily['연도'] == year) & (
         df_daily['date_only'] <= today)]['총발주부수'].sum()
-
-    # last year YTD / total (from DAILY to be consistent)
-    ly = year - 1
     same_date_ly = safe_same_date_last_year(today)
     ytd_ly = df_daily[(df_daily['연도'] == ly) & (
         df_daily['date_only'] <= same_date_ly)]['총발주부수'].sum()
     last_year_total = df_daily[df_daily['연도'] == ly]['총발주부수'].sum()
 
-    # business-day based progress target
-    ratio_biz = business_day_ratio_for_year(today)  # 0~1
+    # 영업일 경과율 (주말+KR 공휴일 제외)
+    hol = kr_holidays_for_year(year)
+    elapsed_biz_days = business_days_in_range(date(year, 1, 1), today, hol)
+    total_biz_days = business_days_in_range(
+        date(year, 1, 1), date(year, 12, 31), hol)
+    ratio_biz = (elapsed_biz_days / total_biz_days) if total_biz_days else 0.0
+
     target_biz = last_year_total * ratio_biz if last_year_total else 0
     progress_vs_biz = (ytd_curr / target_biz * 100) if target_biz else None
 
-    # seasonal (월별 가중) progress target using last year's monthly distribution
+    # 월별 가중 pace (작년 월분포)
     seasonal_share = seasonal_cum_share_to_date(
         df_monthly, '발주량', ly, today)  # 0~1
     target_seasonal = last_year_total * seasonal_share if last_year_total else 0
@@ -529,14 +516,24 @@ def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, 
         'ratio_biz': ratio_biz,
         'progress_vs_biz': progress_vs_biz,
         'seasonal_share_to_date': seasonal_share,
-        'progress_vs_seasonal': progress_vs_seasonal
+        'progress_vs_seasonal': progress_vs_seasonal,
+        'elapsed_biz_days': elapsed_biz_days,
+        'total_biz_days': total_biz_days,
+        'today': today,
+        'same_date_ly': same_date_ly
     }
 
 
-def badge(text, color="#2b8a3e"):
-    return html.Span(text, style={
-        'display': 'inline-block', 'padding': '4px 8px', 'borderRadius': '999px', 'background': color, 'color': 'white', 'fontSize': '0.8rem', 'fontWeight': '700'
-    })
+def badge(text, color="#2b8a3e", tip=None):
+    return html.Span(
+        text,
+        title=tip,  # 마우스 오버 시 브라우저 기본 툴팁
+        style={
+            'display': 'inline-block', 'padding': '4px 8px', 'borderRadius': '999px',
+            'background': color, 'color': 'white', 'fontSize': '0.8rem', 'fontWeight': '700',
+            'cursor': 'help'
+        }
+    )
 
 
 def kpi_card(title, value, subtitle):
@@ -567,29 +564,56 @@ def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int
                  "Color Pages (Daily sum)"),
     ])
 
-    # 3행: 고급 경과율 배지
+    # 3행: 고급 경과율 배지 (툴팁 포함)
     prog = compute_progress_advanced(df_daily, df_monthly, year)
     badges = []
-    # YTD vs 작년 동기간
+
+    # (1) YTD vs 작년 동기간
     if prog['ytd_ly']:
         ytd_vs_ly = prog['ytd_curr'] / prog['ytd_ly'] * 100
-        badges.append(badge(f"YTD vs 작년 동기간: {ytd_vs_ly:.1f}%", "#0b7285"))
-    # 영업일 경과율 기반
+        tip_ytd = (
+            f"올해 YTD(1/1~{prog['today']:%Y-%m-%d}) {prog['ytd_curr']:,} ÷ "
+            f"작년 YTD(1/1~{prog['same_date_ly']:%Y-%m-%d}) {prog['ytd_ly']:,} × 100"
+        )
+        badges.append(
+            badge(f"YTD vs 작년 동기간: {ytd_vs_ly:.1f}%", "#0b7285", tip=tip_ytd))
+
+    # (2) 경과율(영업일) 대비 달성도
     if prog['progress_vs_biz'] is not None:
         color_biz = "#2b8a3e" if prog['progress_vs_biz'] >= 100 else "#d9480f"
-        badges.append(
-            badge(f"경과율(영업일) 대비 달성도: {prog['progress_vs_biz']:.1f}%", color_biz))
-    # 월별 가중 pace 기반
+        tip_biz = (
+            f"올해 YTD {prog['ytd_curr']:,} ÷ "
+            f"(작년 연간 {prog['last_year_total']:,} × 영업일 경과율 {prog['ratio_biz']*100:.1f}% "
+            f"[{prog['elapsed_biz_days']}/{prog['total_biz_days']}일]) × 100"
+        )
+        badges.append(badge(
+            f"경과율(영업일) 대비 달성도: {prog['progress_vs_biz']:.1f}%", color_biz, tip=tip_biz))
+
+    # (3) 월별 가중 pace 대비 달성도
     if prog['progress_vs_seasonal'] is not None:
         color_season = "#2b8a3e" if prog['progress_vs_seasonal'] >= 100 else "#d9480f"
-        badges.append(
-            badge(f"월별 가중 pace 대비 달성도: {prog['progress_vs_seasonal']:.1f}%", color_season))
+        tip_season = (
+            f"올해 YTD {prog['ytd_curr']:,} ÷ "
+            f"(작년 연간 {prog['last_year_total']:,} × 월별 가중 누적비중 {prog['seasonal_share_to_date']*100:.1f}%) × 100"
+        )
+        badges.append(badge(
+            f"월별 가중 pace 대비 달성도: {prog['progress_vs_seasonal']:.1f}%", color_season, tip=tip_season))
 
-    # 부가 배지: 영업일 경과율, 월별 가중 누적비중(설명용)
-    badges.append(badge(f"영업일 경과율: {prog['ratio_biz']*100:.1f}%", "#6c757d"))
-    if prog['seasonal_share_to_date'] is not None:
-        badges.append(
-            badge(f"월별 가중 누적비중: {prog['seasonal_share_to_date']*100:.1f}%", "#6c757d"))
+    # (4) 영업일 경과율
+    tip_ratio = (
+        f"올해 1/1~{prog['today']:%Y-%m-%d} 영업일 {prog['elapsed_biz_days']}/{prog['total_biz_days']}일 "
+        f"(주말·공휴일 제외)"
+    )
+    badges.append(
+        badge(f"영업일 경과율: {prog['ratio_biz']*100:.1f}%", "#6c757d", tip=tip_ratio))
+
+    # (5) 월별 가중 누적비중
+    tip_share = (
+        "작년 월별 연간 비중 누적치. 전월 100% 반영 + "
+        "이번 달 비중 × 이번 달 영업일 진행률"
+    )
+    badges.append(badge(
+        f"월별 가중 누적비중: {prog['seasonal_share_to_date']*100:.1f}%", "#6c757d", tip=tip_share))
 
     row3 = html.Div(style={'display': 'flex', 'gap': '8px', 'flexWrap': 'wrap',
                     'alignItems': 'center', 'margin': '4px 2px 0'}, children=badges)
@@ -602,11 +626,11 @@ def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int
 
 
 def forecast_totals(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int):
-    """Return dict of forecasts for total orders, bw pages, color pages and avg/day (business-day year)."""
+    """연말 예상: 주문/흑백/컬러 및 영업일 기준 일평균."""
     today = datetime.now(KST).date()
     ly = year - 1
 
-    # YTD actuals
+    # YTD 실제
     ytd_orders = df_daily[(df_daily['연도'] == year) & (
         df_daily['date_only'] <= today)]['총발주부수'].sum()
     ytd_bw = df_daily[(df_daily['연도'] == year) & (
@@ -614,8 +638,16 @@ def forecast_totals(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int)
     ytd_color = df_daily[(df_daily['연도'] == year) & (
         df_daily['date_only'] <= today)]['컬러페이지'].sum()
 
-    # Ratios / shares
-    ratio_biz_year = business_day_ratio_for_year(today) or 1e-9  # avoid zero
+    # 비중/경과
+    def biz_ratio_year(today_d: date) -> float:
+        hol = kr_holidays_for_year(today_d.year)
+        elapsed = business_days_in_range(
+            date(today_d.year, 1, 1), today_d, hol)
+        total = business_days_in_range(
+            date(today_d.year, 1, 1), date(today_d.year, 12, 31), hol)
+        return (elapsed/total) if total else 0.0
+
+    ratio_biz_year = biz_ratio_year(today) or 1e-9
     share_orders = seasonal_cum_share_to_date(
         df_monthly, '발주량', ly, today) or None
     share_bw = seasonal_cum_share_to_date(
@@ -623,7 +655,6 @@ def forecast_totals(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int)
     share_color = seasonal_cum_share_to_date(
         df_monthly, '컬러출력량', ly, today) or None
 
-    # Forecast using seasonal share if available, else fall back to business-day ratio
     def forecast(ytd, share):
         if share and share > 0:
             return ytd / share
@@ -633,7 +664,6 @@ def forecast_totals(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int)
     f_bw = forecast(ytd_bw, share_bw)
     f_color = forecast(ytd_color, share_color)
 
-    # Avg per business day (year)
     total_biz_days = total_business_days_in_year(year)
     avg_per_bd = (f_orders / total_biz_days) if total_biz_days else 0.0
 
@@ -808,7 +838,6 @@ def update_kpis(selected_year):
         else:
             years = sorted(DF_DAILY['연도'].unique())
 
-            # 정렬/가독성 스타일
             td_year_style = {
                 'textAlign': 'left', 'padding': '6px 8px', 'borderBottom': '1px solid #f1f3f5'}
             td_num_style = {
