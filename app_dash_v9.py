@@ -507,7 +507,15 @@ def build_today_panel_content(df_daily: pd.DataFrame):
         "예상 제본 시간": fmt(r.get('예상제본시간')), "최종 출고": fmt(r.get('최종출고')),
         "출고 부수": fmt(r.get('출고부수'))
     }
-    grid = [html.Div(k, style={'color': '#666'}), html.Div(v, style={'textAlign': 'right', 'fontWeight': '700'}) for k, v in items.items()]
+    # SYNTAX ERROR FIX: The list comprehension was creating two elements per loop.
+    # This is fixed by using a nested loop to flatten the structure.
+    grid = [
+        item for k, v in items.items()
+        for item in (
+            html.Div(k, style={'color': '#666'}),
+            html.Div(v, style={'textAlign': 'right', 'fontWeight': '700'})
+        )
+    ]
     return html.Div(grid, style={'display': 'grid', 'gridTemplateColumns': 'auto 1fr', 'rowGap': '8px', 'columnGap': '16px'})
 
 
@@ -830,7 +838,11 @@ def load_memo_from_storage(memo_data):
 # -----------------------------------------------------------------------------
 if __name__ == '__main__':
     # 외부 CSS 파일 추가
-    with open("assets/styles.css", "w") as f:
+    assets_dir = "assets"
+    if not os.path.exists(assets_dir):
+        os.makedirs(assets_dir)
+
+    with open(os.path.join(assets_dir, "styles.css"), "w") as f:
         f.write("""
 body { font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; background-color: #f8f9fa; }
 .chart-container { background: white; border-radius: 12px; padding: 14px; box-shadow: 0 4px 14px rgba(0,0,0,0.08); margin-bottom: 16px; }
@@ -861,9 +873,6 @@ body { font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; background-colo
 .memo-btn-save { background-color: #228be6; color: white; }
 .memo-btn-clear { background-color: #e9ecef; color: #495057; }
         """)
-    if not os.path.exists("assets"):
-        os.makedirs("assets")
-    os.rename("assets/styles.css", "assets/styles.css")
 
     host = os.getenv('DASH_HOST', '127.0.0.1')
     port = int(os.getenv('DASH_PORT', '8090'))
