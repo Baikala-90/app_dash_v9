@@ -9,6 +9,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 import dash
 from dash import dcc, html, Input, Output, State, callback
+from dash.exceptions import PreventUpdate
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -17,6 +18,9 @@ import pytz
 
 load_dotenv()
 KST = pytz.timezone('Asia/Seoul')
+
+# ===== 자동 새로고침 간격(분) =====
+AUTO_REFRESH_MIN = 15  # 사용자 요청: 15분
 
 # -----------------------------------------------------------------------------
 # 공통 유틸
@@ -28,14 +32,14 @@ def norm(s: str) -> str:
 
 
 def find_credentials_path():
-    # env 우선
+    # ✅ 마지막 성공본의 자격증명 탐색 로직을 그대로 유지 (변경하지 않음)
     for p in [os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
               os.getenv("GSPREAD_CREDENTIALS"),
               "credentials.json", "service_account.json"]:
         if p and os.path.exists(p):
             print(f"[INFO] Using credentials: {p}")
             return p
-    # env로 JSON 본문을 넣은 경우(선택)
+    # env에 JSON 본문을 직접 넣은 경우(선택)
     content = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     if content:
         path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
@@ -354,21 +358,20 @@ def figure_weekly_today_based(df_daily: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=x_week, y=y_last, mode='lines+markers+text', name='지난 주',
-        line=dict(width=2, dash='dot'),
-        customdata=last_dates_str,
+        line=dict(width=2, dash='dot'), customdata=last_dates_str,
         hovertemplate="%{customdata}<br>지난 주: %{y:,}부<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_last], textposition='top center', textfont={'size': 11}
     ))
     fig.add_trace(go.Scatter(
         x=x_week, y=y_this, mode='lines+markers+text', name='이번 주',
-        line=dict(width=3),
-        customdata=this_dates_str,
+        line=dict(width=3), customdata=this_dates_str,
         hovertemplate="%{customdata}<br>이번 주: %{y:,}부<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_this], textposition='top center', textfont={'size': 11}
     ))
     fig.update_layout(title=f'주간 발주량 비교 (기준일: {now.strftime("%Y-%m-%d")})',
                       xaxis_title='', yaxis_title='발주 부수', template='plotly_white', height=280,
-                      margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
+                      margin=dict(l=20, r=20, t=40, b=20),
+                      legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
     return fig
 
 
@@ -396,22 +399,21 @@ def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None) 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=x_week, y=y_last, mode='lines+markers+text', name='지난 주',
-        line=dict(width=2, dash='dot'),
-        customdata=last_dates_str,
+        line=dict(width=2, dash='dot'), customdata=last_dates_str,
         hovertemplate="%{customdata}<br>지난 주: %{y:,}부<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_last], textposition='top center', textfont={'size': 11}
     ))
     fig.add_trace(go.Scatter(
         x=x_week, y=y_this, mode='lines+markers+text', name='이번 주',
-        line=dict(width=3),
-        customdata=this_dates_str,
+        line=dict(width=3), customdata=this_dates_str,
         hovertemplate="%{customdata}<br>이번 주: %{y:,}부<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_this], textposition='top center', textfont={'size': 11}
     ))
     title_range = f"{week_days[0].strftime('%Y-%m-%d')} ~ {week_days[-1].strftime('%Y-%m-%d')}"
     fig.update_layout(title=f'주간 발주량 비교 (월~금 고정): {title_range}',
                       xaxis_title='', yaxis_title='발주 부수', template='plotly_white', height=300,
-                      margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
+                      margin=dict(l=20, r=20, t=40, b=20),
+                      legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
     return fig
 
 
@@ -428,7 +430,8 @@ def figure_months_1to12(df_monthly: pd.DataFrame, start_year=2022, current_year=
     fig = px.line(pivot, x=pivot.index, y=pivot.columns, markers=True,
                   title=f'월별 발주량 (1~12월, {start_year}~{current_year})')
     fig.update_layout(xaxis_title='', yaxis_title='발주량', template='plotly_white', height=300,
-                      margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
+                      margin=dict(l=20, r=20, t=40, b=20),
+                      legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
     fig.update_xaxes(dtick=1)
     return fig
 
@@ -448,15 +451,12 @@ def yoy_line_value_bar_rate(d: pd.DataFrame, value_col: str, title: str, baselin
     fig = go.Figure()
     for y, sub in d.groupby('연도'):
         fig.add_trace(go.Scatter(
-            x=sub['월번호'], y=sub[value_col], mode='lines+markers', name=f'{y}년 ({value_col})'
-        ))
+            x=sub['월번호'], y=sub[value_col], mode='lines+markers', name=f'{y}년 ({value_col})'))
     base = d[d['연도'] == baseline_year]
     fig.add_trace(go.Bar(
         x=base['월번호'], y=base['YoY%'], name=f'{baseline_year} YoY%',
-        yaxis='y2', opacity=0.6,
-        hovertemplate="증감율: %{y:.1f}%<extra></extra>"
+        yaxis='y2', opacity=0.6, hovertemplate="증감율: %{y:.1f}%<extra></extra>"
     ))
-
     fig.update_layout(
         title=title, xaxis_title='', yaxis_title=value_col,
         yaxis2=dict(title='YoY %', overlaying='y',
@@ -661,7 +661,7 @@ def build_today_panel(df_daily: pd.DataFrame):
                 html.Div("컬러 페이지",  style={'color': '#666'}), html.Div(
                     color_pages, style={'textAlign': 'right', 'fontWeight': '700'}),
                 html.Div("예상 제본 시간", style={'color': '#666'}), html.Div(
-                    bind_time, style={'textAlign': 'right', 'fontWeight': '700'}),
+                    bind_time,  style={'textAlign': 'right', 'fontWeight': '700'}),
                 html.Div("최종 출고",    style={'color': '#666'}), html.Div(
                     last_ship,   style={'textAlign': 'right', 'fontWeight': '700'}),
                 html.Div("출고 부수",    style={'color': '#666'}), html.Div(
@@ -676,7 +676,7 @@ def build_today_panel(df_daily: pd.DataFrame):
     ])
 
     return html.Div(style={
-        'position': 'fixed', 'top': '80px', 'right': '16px', 'width': '310px', 'zIndex': '999',
+        'position': 'fixed', 'top': '80px', 'right': '16px', 'width': 'min(94vw, 310px)', 'zIndex': '999',
         'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
         'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '12px 14px',
         'boxShadow': '0 10px 22px rgba(0,0,0,0.12)'
@@ -705,22 +705,37 @@ CURRENT_YEAR = datetime.now(KST).year
 
 # 초기엔 빈 옵션/빈 그림으로 즉시 렌더 → Render 헬스체크 통과
 app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding': '16px', 'fontFamily': 'Noto Sans KR, Malgun Gothic, Arial'}, children=[
+    # 초기 로드/오늘패널 주기
     dcc.Interval(id='init', interval=250, n_intervals=0,
                  max_intervals=1),  # 최초 1회 데이터 로드
     dcc.Interval(id='today-refresh', interval=120*1000,
                  n_intervals=0),     # 오늘 패널 2분마다 갱신
+    # ✅ 15분 자동 새로고침 (안전 모드)
+    dcc.Interval(id='data-auto-refresh',
+                 interval=AUTO_REFRESH_MIN*60*1000, n_intervals=0),
+
+    # 글로벌 상태 저장
+    dcc.Store(id='data-version', storage_type='memory', data=0),  # 데이터 재계산 트리거
+    dcc.Store(id='today-visible', storage_type='local', data=True),
+    dcc.Store(id='memo-visible', storage_type='local', data=False),
+    dcc.Store(id='memo-storage', storage_type='local', data=""),
 
     html.H1("발주량 분석 대시보드", style={
             'textAlign': 'center', 'marginBottom': '6px'}),
     html.P("구글 시트 데이터 기반 · 2021~현재", style={
            'textAlign': 'center', 'marginBottom': '14px', 'color': '#666'}),
 
-    html.Div(style={'display': 'flex', 'gap': '10px', 'justifyContent': 'center', 'alignItems': 'center', 'marginBottom': '8px'}, children=[
+    # 컨트롤 바
+    html.Div(style={'display': 'flex', 'gap': '10px', 'justifyContent': 'center', 'alignItems': 'center', 'marginBottom': '8px', 'flexWrap': 'wrap'}, children=[
         html.Span("KPI 연도 선택:", style={'fontWeight': '600'}),
         dcc.Dropdown(id='year-select',
                      options=[{'label': f'{CURRENT_YEAR}년',
                                'value': CURRENT_YEAR}],  # 임시
                      value=CURRENT_YEAR, clearable=False, style={'width': '220px'}),
+        # 수동 새로고침 버튼
+        html.Button("데이터 새로고침", id="manual-refresh", n_clicks=0, title="구글 시트에서 다시 불러오기",
+                    style={'borderRadius': '999px', 'padding': '8px 12px', 'fontWeight': '700', 'border': '1px solid #e2e8f0',
+                           'background': '#2563eb', 'color': 'white', 'cursor': 'pointer'}),
         html.Div(id='kpi-refresh-status',
                  style={'marginLeft': '12px', 'color': '#888'})
     ]),
@@ -770,10 +785,47 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
         html.Div(id="metric-tab-content", style={'padding': '8px 4px'})
     ]),
 
-    # 화면 오른쪽 고정 "오늘 현황" 패널
-    html.Div(id='today-floating-panel')
+    # 화면 오른쪽 고정 "오늘 현황" 패널 (토글로 표시/숨김)
+    html.Div(id='today-floating-panel'),
 
-    # footer는 패널 가림 방지를 위해 제거하거나 여기에 추가 가능
+    # ===== 메모장 팝업 =====
+    html.Div(id='memo-popup', style={
+        'position': 'fixed', 'left': '16px', 'bottom': '76px',
+        'width': 'min(92vw, 360px)', 'zIndex': '1000',
+        'display': 'none',
+        'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
+        'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '10px 12px',
+        'boxShadow': '0 10px 22px rgba(0,0,0,0.12)', 'maxHeight': '70vh', 'overflowY': 'auto'
+    }, children=[
+        html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center', 'marginBottom': '6px'}, children=[
+            html.Div("메모장", style={'fontWeight': '800', 'fontSize': '1.0rem'}),
+            html.Div([
+                html.Button("저장", id="memo-save-btn", n_clicks=0,
+                            style={'marginRight': '6px'}),
+                html.Button("지우기", id="memo-clear-btn", n_clicks=0,
+                            style={'marginRight': '6px'}),
+                html.Button("닫기", id="memo-close-btn", n_clicks=0),
+            ])
+        ]),
+        dcc.Textarea(
+            id='memo-text', style={'width': '100%', 'height': '30vh', 'resize': 'vertical'}),
+        html.Div(style={'marginTop': '6px', 'textAlign': 'right',
+                 'color': '#888', 'fontSize': '0.8rem'}, id='memo-status')
+    ]),
+
+    # ===== 우하단/좌하단 FAB 버튼 =====
+    html.Button("오늘 현황", id="fab-today-toggle", n_clicks=0, title="오른쪽 패널 열기/닫기", style={
+        'position': 'fixed', 'right': '16px', 'bottom': '16px',
+        'borderRadius': '999px', 'padding': '12px 16px', 'fontWeight': '800',
+        'background': '#2563eb', 'color': 'white', 'border': 'none',
+        'boxShadow': '0 8px 18px rgba(0,0,0,0.18)', 'zIndex': 1100, 'cursor': 'pointer'
+    }),
+    html.Button("메모장", id="fab-memo-toggle", n_clicks=0, title="메모장 열기/닫기", style={
+        'position': 'fixed', 'left': '16px', 'bottom': '16px',
+        'borderRadius': '999px', 'padding': '12px 16px', 'fontWeight': '800',
+        'background': '#059669', 'color': 'white', 'border': 'none',
+        'boxShadow': '0 8px 18px rgba(0,0,0,0.18)', 'zIndex': 1100, 'cursor': 'pointer'
+    }),
 ])
 
 # -----------------------------------------------------------------------------
@@ -814,6 +866,27 @@ def ensure_data_loaded():
         DATA["loaded"] = True  # 실패해도 앱은 동작
 
 # -----------------------------------------------------------------------------
+# (안전) 자동/수동 새로고침 → data-version 증가
+# -----------------------------------------------------------------------------
+
+
+@callback(
+    Output('data-version', 'data'),
+    Input('data-auto-refresh', 'n_intervals'),
+    Input('manual-refresh', 'n_clicks'),
+    State('data-version', 'data'),
+    prevent_initial_call=False
+)
+def auto_or_manual_reload(_n, _clicks, ver):
+    try:
+        # 전역 캐시 리셋 후 재로딩 (실패 시 화면 유지)
+        DATA["loaded"] = False
+        ensure_data_loaded()
+        return (ver or 0) + 1
+    except Exception as _e:
+        raise PreventUpdate
+
+# -----------------------------------------------------------------------------
 # 콜백
 # -----------------------------------------------------------------------------
 
@@ -822,9 +895,10 @@ def ensure_data_loaded():
     Output('year-select', 'options'),
     Output('year-select', 'value'),
     Input('init', 'n_intervals'),
+    Input('data-version', 'data'),
     prevent_initial_call=False
 )
-def init_year_options(_):
+def init_year_options(_, _ver):
     ensure_data_loaded()
     opts = DATA["years_options"]
     latest = max([o['value'] for o in opts]) if opts else CURRENT_YEAR
@@ -835,9 +909,10 @@ def init_year_options(_):
     Output('kpi-cards', 'children'),
     Output('prev-years-kpi', 'children'),
     Output('kpi-refresh-status', 'children'),
-    Input('year-select', 'value')
+    Input('year-select', 'value'),
+    Input('data-version', 'data')
 )
-def update_kpis(selected_year):
+def update_kpis(selected_year, _ver):
     ensure_data_loaded()
     df_d = DATA["daily"]
     df_m = DATA["monthly"]
@@ -877,12 +952,10 @@ def update_kpis(selected_year):
                 html.Th("총 발주 일수",    style=th_num_style),
             ])
 
-            prev_tbl = html.Table(
-                [header] + rows,
-                style={'width': '100%', 'borderCollapse': 'collapse',
-                       'tableLayout': 'fixed'},
-                className="kpi-table"
-            )
+            prev_tbl = html.Table([header] + rows,
+                                  style={
+                                      'width': '100%', 'borderCollapse': 'collapse', 'tableLayout': 'fixed'},
+                                  className="kpi-table")
 
         stamp = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
         return kpi_layout, prev_tbl, f"업데이트: {stamp}"
@@ -893,47 +966,60 @@ def update_kpis(selected_year):
 @callback(
     Output('week-select-fixed', 'options'),
     Output('week-select-fixed', 'value'),
-    Input('year-select', 'value')
+    Input('year-select', 'value'),
+    Input('data-version', 'data')
 )
-def refresh_week_options(_selected_year):
+def refresh_week_options(_selected_year, _ver):
     ensure_data_loaded()
     return DATA["week_options"], 'this_week'
 
 
 @callback(
     Output('weekly-chart-today', 'figure'),
-    Input('year-select', 'value')
+    Input('year-select', 'value'),
+    Input('data-version', 'data')
 )
-def refresh_weekly_today(_selected_year):
+def refresh_weekly_today(_selected_year, _ver):
     ensure_data_loaded()
     return figure_weekly_today_based(DATA["daily"])
 
 
 @callback(
     Output('weekly-chart-fixed', 'figure'),
-    Input('week-select-fixed', 'value')
+    Input('week-select-fixed', 'value'),
+    Input('data-version', 'data')
 )
-def update_week_fixed(monday_str):
+def update_week_fixed(monday_str, _ver):
     ensure_data_loaded()
     return figure_weekly_fixed_mon_fri(DATA["daily"], monday_str)
 
 
 @callback(
     Output('months-1to12-chart', 'figure'),
-    Input('year-select', 'value')
+    Input('year-select', 'value'),
+    Input('data-version', 'data')
 )
-def refresh_month_chart(_selected_year):
+def refresh_month_chart(_selected_year, _ver):
     ensure_data_loaded()
     cy = datetime.now(KST).year
     return figure_months_1to12(DATA["monthly"], start_year=2022, current_year=cy)
 
 
+# (선택) forecast 탭 함수가 없을 경우 안전한 더미 제공
+try:
+    forecast_cards_layout  # type: ignore
+except NameError:
+    def forecast_cards_layout(_df_d, _df_m, _year):
+        return html.Div()
+
+
 @callback(
     Output("metric-tab-content", "children"),
     Input("metric-tabs", "value"),
-    Input("year-select", "value")
+    Input("year-select", "value"),
+    Input("data-version", "data")
 )
-def switch_metric_tab(tab_value, selected_year):
+def switch_metric_tab(tab_value, selected_year, _ver):
     ensure_data_loaded()
     figs = {
         "avg": yoy_line_value_bar_rate(DATA["monthly"], '일평균발주량', '월별 일평균 발주량 + YoY%', selected_year),
@@ -949,17 +1035,107 @@ def switch_metric_tab(tab_value, selected_year):
     fig.update_layout(height=460)
     return dcc.Graph(figure=fig, style={'height': '480px'})
 
-# 오늘 패널 갱신 (초기 + 2분 주기)
+# 오늘 패널 갱신 (초기 + 2분 주기 + 데이터 리로드 시)
 
 
 @callback(
     Output('today-floating-panel', 'children'),
     Input('today-refresh', 'n_intervals'),
+    Input('data-version', 'data'),
     prevent_initial_call=False
 )
-def refresh_today_panel(_n):
+def refresh_today_panel(_n, _ver):
     ensure_data_loaded()
     return build_today_panel(DATA["daily"])
+
+# ===== 오늘 현황 패널 표시/숨김 =====
+
+
+@callback(
+    Output('today-floating-panel', 'style'),
+    Input('today-visible', 'data'),
+    prevent_initial_call=False
+)
+def apply_today_visibility(visible):
+    if bool(visible) or visible is None:
+        return {}  # 표시
+    return {'display': 'none'}
+
+
+@callback(
+    Output('today-visible', 'data'),
+    Input('fab-today-toggle', 'n_clicks'),
+    State('today-visible', 'data'),
+    prevent_initial_call=True
+)
+def toggle_today_visible(_n, visible):
+    return not bool(visible)
+
+# ===== 메모 팝업 제어 =====
+
+
+@callback(
+    Output('memo-visible', 'data'),
+    Input('fab-memo-toggle', 'n_clicks'),
+    Input('memo-close-btn', 'n_clicks'),
+    State('memo-visible', 'data'),
+    prevent_initial_call=True
+)
+def toggle_memo_visible(fab_clicks, close_clicks, visible):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return visible
+    trig = ctx.triggered[0]['prop_id'].split('.')[0]
+    if trig == 'memo-close-btn':
+        return False
+    return not bool(visible)
+
+
+@callback(
+    Output('memo-popup', 'style'),
+    Output('memo-text', 'value'),
+    Output('memo-status', 'children'),
+    Output('memo-storage', 'data'),
+    Input('memo-visible', 'data'),
+    Input('memo-save-btn', 'n_clicks'),
+    Input('memo-clear-btn', 'n_clicks'),
+    State('memo-text', 'value'),
+    State('memo-storage', 'data'),
+    prevent_initial_call=False
+)
+def memo_controller(visible, save_n, clear_n, text, stored):
+    base_style = {
+        'position': 'fixed', 'left': '16px', 'bottom': '76px',
+        'width': 'min(92vw, 360px)', 'zIndex': '1000',
+        'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
+        'border': '1px solid '  # edf2f7', 'borderRadius': '14px', 'padding': '10px 12px',
+        'boxShadow': '0 10px 22px rgba(0,0,0,0.12)', 'maxHeight': '70vh', 'overflowY': 'auto'
+    }
+    ctx = dash.callback_context
+
+    # 초기 렌더
+    if not ctx.triggered:
+        display = 'block' if bool(visible) else 'none'
+        return ({**base_style, 'display': display}, stored or "", "", stored or "")
+
+    trig = ctx.triggered[0]['prop_id'].split('.')[0]
+
+    # 표시/숨김 변화
+    if trig == 'memo-visible':
+        display = 'block' if bool(visible) else 'none'
+        return ({**base_style, 'display': display}, stored if visible else (text or ""), "", stored if visible else (text or ""))
+
+    # 저장
+    if trig == 'memo-save-btn':
+        content = text or ""
+        return ({**base_style, 'display': 'block'}, content, "저장 완료", content)
+
+    # 지우기
+    if trig == 'memo-clear-btn':
+        return ({**base_style, 'display': 'block'}, "", "모든 내용을 지웠습니다.", "")
+
+    display = 'block' if bool(visible) else 'none'
+    return ({**base_style, 'display': display}, stored or "", "", stored or "")
 
 
 # -----------------------------------------------------------------------------
