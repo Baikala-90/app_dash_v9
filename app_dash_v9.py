@@ -1,4 +1,7 @@
-import os
+# Apply an update that enables automatic periodic refresh from Google Sheets
+# and daily rollover without manual button presses.
+# This overwrites /mnt/data/app_dash_v9.py with the new version.
+updated_code = r'''import os
 import re
 import calendar
 from datetime import datetime, timedelta, date
@@ -68,7 +71,9 @@ DATA = {
     "daily": pd.DataFrame(),
     "monthly": pd.DataFrame(),
     "years_options": [],
-    "week_options": []
+    "week_options": [],
+    "last_reload_at": None,  # 마지막 로딩 시각(KST)
+    "last_reload_date": None  # 마지막 로딩 '날짜'(YYYY-MM-DD)
 }
 
 
@@ -702,6 +707,7 @@ app = dash.Dash(__name__,
 server = app.server
 
 CURRENT_YEAR = datetime.now(KST).year
+AUTO_REFRESH_MIN = int(os.getenv("AUTO_REFRESH_MINUTES", "15"))  # 기본 15분마다 자동 새로고침
 
 # 초기엔 빈 옵션/빈 그림으로 즉시 렌더 → Render 헬스체크 통과
 app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding': '16px', 'fontFamily': 'Noto Sans KR, Malgun Gothic, Arial'}, children=[
@@ -709,6 +715,8 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
                  max_intervals=1),  # 최초 1회 데이터 로드
     dcc.Interval(id='today-refresh', interval=120*1000,
                  n_intervals=0),     # 오늘 패널 2분마다 갱신
+    dcc.Interval(id='data-auto-refresh', interval=AUTO_REFRESH_MIN*60*1000,
+                 n_intervals=0),     # **자동** 데이터 새로고침(기본 15분)
 
     html.H1("발주량 분석 대시보드", style={
             'textAlign': 'center', 'marginBottom': '6px'}),
@@ -740,6 +748,7 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
     dcc.Store(id='data-version', storage_type='memory', data=0),
     dcc.Store(id='today-visible', storage_type='local', data=True),
     dcc.Store(id='memo-storage', storage_type='local', data=""),
+    dcc.Store(id='last-refresh-date', storage_type='memory', data=""),  # 'YYYY-MM-DD'
 
     html.Div(id='kpi-cards'),
 
@@ -800,17 +809,13 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
         html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center', 'marginBottom': '6px'}, children=[
             html.Div("메모장", style={'fontWeight': '800', 'fontSize': '1.0rem'}),
             html.Div([
-                html.Button("저장", id="memo-save-btn", n_clicks=0,
-                            style={'marginRight': '6px'}),
-                html.Button("지우기", id="memo-clear-btn", n_clicks=0,
-                            style={'marginRight': '6px'}),
+                html.Button("저장", id="memo-save-btn", n_clicks=0, style={'marginRight': '6px'}),
+                html.Button("지우기", id="memo-clear-btn", n_clicks=0, style={'marginRight': '6px'}),
                 html.Button("닫기", id="memo-close-btn", n_clicks=0),
             ])
         ]),
-        dcc.Textarea(
-            id='memo-text', style={'width': '100%', 'height': '200px', 'resize': 'vertical'}),
-        html.Div(style={'marginTop': '6px', 'textAlign': 'right',
-                 'color': '#888', 'fontSize': '0.8rem'}, id='memo-status')
+        dcc.Textarea(id='memo-text', style={'width': '100%', 'height': '200px', 'resize': 'vertical'}),
+        html.Div(style={'marginTop': '6px', 'textAlign': 'right', 'color': '#888', 'fontSize': '0.8rem'}, id='memo-status')
     ]),
 ])
 
@@ -840,6 +845,8 @@ def ensure_data_loaded():
             DATA["week_options"] = [
                 {'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}]
         DATA["loaded"] = True
+        DATA["last_reload_at"] = datetime.now(KST)
+        DATA["last_reload_date"] = DATA["last_reload_at"].strftime('%Y-%m-%d')
         print("[INFO] Data loaded successfully.")
     except Exception as e:
         print("[ERROR] 데이터 로드 실패:", e)
@@ -850,6 +857,8 @@ def ensure_data_loaded():
         DATA["week_options"] = [
             {'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}]
         DATA["loaded"] = True  # 실패해도 앱은 동작
+        DATA["last_reload_at"] = datetime.now(KST)
+        DATA["last_reload_date"] = DATA["last_reload_at"].strftime('%Y-%m-%d')
 
 # -----------------------------------------------------------------------------
 # 콜백
@@ -986,8 +995,6 @@ def switch_metric_tab(tab_value, selected_year, _ver):
         "color": yoy_line_value_bar_rate(DATA["monthly"], '컬러출력량', '월별 컬러 페이지 + YoY%', selected_year),
     }
     if tab_value == "forecast":
-        # 기존 코드에 forecast_cards_layout이 정의되어 있지 않아서,
-        # 안전하게 안내 문구를 출력합니다.
         return html.Div(style={'padding': '12px'}, children=[
             html.Div("연간 예측 탭은 준비 중입니다.", style={'color': '#666'})
         ])
@@ -1009,7 +1016,7 @@ def refresh_today_panel(_n, _ver):
     return build_today_panel(DATA["daily"])
 
 
-# ===== 새로고침 버튼: 캐시 리셋 후 재로딩 & 버전 증가 =====
+# ===== 수동 새로고침 버튼: 캐시 리셋 후 재로딩 & 버전 증가 =====
 @callback(
     Output('data-version', 'data'),
     Output('last-refresh-stamp', 'children'),
@@ -1021,8 +1028,40 @@ def force_reload(n, ver):
     DATA["loaded"] = False  # 캐시 리셋
     ensure_data_loaded()    # 즉시 재로딩
     new_ver = (ver or 0) + 1
-    stamp = datetime.now(KST).strftime("최근 새로고침: %Y-%m-%d %H:%M:%S KST")
+    stamp = datetime.now(KST).strftime("최근 새로고침: %Y-%m-%d %H:%M:%S KST (수동)")
     return new_ver, stamp
+
+
+# ===== 자동 새로고침(주기 + 날짜 변경 감지) =====
+@callback(
+    Output('data-version', 'data'),
+    Output('last-refresh-stamp', 'children'),
+    Output('last-refresh-date', 'data'),
+    Input('data-auto-refresh', 'n_intervals'),
+    State('data-version', 'data'),
+    State('last-refresh-date', 'data'),
+    prevent_initial_call=False
+)
+def auto_reload(_n, ver, last_date_str):
+    # 날짜가 바뀌었는지 확인(한국시간 기준)
+    today_str = datetime.now(KST).strftime('%Y-%m-%d')
+    must_reload = False
+    if last_date_str != today_str:
+        must_reload = True  # 날짜가 바뀌면 무조건 새로고침
+
+    # 또한 주기적으로도 새로고침(간단/안전하게 매 interval마다 갱신)
+    must_reload = True
+
+    if must_reload:
+        DATA["loaded"] = False
+        ensure_data_loaded()
+        new_ver = (ver or 0) + 1
+        stamp = datetime.now(KST).strftime(f"자동 새로고침: %Y-%m-%d %H:%M:%S KST (주기 {AUTO_REFRESH_MIN}분)")
+        return new_ver, stamp, today_str
+
+    # 기본: 스탬프는 유지
+    stamp = datetime.now(KST).strftime("유지: %Y-%m-%d %H:%M:%S KST")
+    return ver, stamp, last_date_str
 
 
 # ===== 오늘 현황 표시/숨김 토글 =====
@@ -1119,3 +1158,7 @@ if __name__ == '__main__':
     port = int(os.getenv('DASH_PORT', '8090'))
     print(f"브라우저에서 http://{host}:{port} 으로 접속하세요.")
     app.run(debug=True, host=host, port=port)
+'''
+with open('/mnt/data/app_dash_v9.py', 'w', encoding='utf-8') as f:
+    f.write(updated_code)
+print("Updated with automatic periodic refresh. Saved to /mnt/data/app_dash_v9.py")
