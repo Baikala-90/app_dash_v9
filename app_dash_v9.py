@@ -725,22 +725,6 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
                  style={'marginLeft': '12px', 'color': '#888'})
     ]),
 
-    # ===== 상단 툴바 (새로고침/토글/메모) =====
-    html.Div(style={'display': 'flex', 'gap': '8px', 'justifyContent': 'center', 'alignItems': 'center', 'margin': '8px 0 12px'}, children=[
-        html.Button("데이터 새로고침", id="refresh-btn", n_clicks=0,
-                    style={'padding': '8px 12px', 'borderRadius': '10px', 'border': '1px solid #e9ecef', 'cursor': 'pointer', 'fontWeight': '700', 'background': 'white', 'boxShadow': '0 2px 8px rgba(0,0,0,0.06)'}),
-        html.Div(id='last-refresh-stamp', style={'color': '#666'}),
-        html.Button("오늘 현황 닫기/열기", id="toggle-today-btn", n_clicks=0,
-                    style={'padding': '6px 10px', 'borderRadius': '10px', 'border': '1px solid #e9ecef', 'cursor': 'pointer', 'background': 'white'}),
-        html.Button("메모장 열기", id="memo-open-btn", n_clicks=0,
-                    style={'padding': '6px 10px', 'borderRadius': '10px', 'border': '1px solid #e9ecef', 'cursor': 'pointer', 'background': 'white'}),
-    ]),
-
-    # 버전/상태/메모 저장소
-    dcc.Store(id='data-version', storage_type='memory', data=0),
-    dcc.Store(id='today-visible', storage_type='local', data=True),
-    dcc.Store(id='memo-storage', storage_type='local', data=""),
-
     html.Div(id='kpi-cards'),
 
     html.Details(open=False, children=[
@@ -786,32 +770,10 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
         html.Div(id="metric-tab-content", style={'padding': '8px 4px'})
     ]),
 
-    # 화면 오른쪽 고정 "오늘 현황" 패널(컨테이너: 표시/숨김은 style 콜백으로 제어)
-    html.Div(id='today-floating-panel'),
+    # 화면 오른쪽 고정 "오늘 현황" 패널
+    html.Div(id='today-floating-panel')
 
-    # 메모장 팝업 (좌상단 고정)
-    html.Div(id='memo-popup', style={
-        'position': 'fixed', 'top': '80px', 'left': '16px', 'width': '360px', 'zIndex': '1000',
-        'display': 'none',  # 콜백에서 'block'으로 토글
-        'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
-        'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '10px 12px',
-        'boxShadow': '0 10px 22px rgba(0,0,0,0.12)'
-    }, children=[
-        html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center', 'marginBottom': '6px'}, children=[
-            html.Div("메모장", style={'fontWeight': '800', 'fontSize': '1.0rem'}),
-            html.Div([
-                html.Button("저장", id="memo-save-btn", n_clicks=0,
-                            style={'marginRight': '6px'}),
-                html.Button("지우기", id="memo-clear-btn", n_clicks=0,
-                            style={'marginRight': '6px'}),
-                html.Button("닫기", id="memo-close-btn", n_clicks=0),
-            ])
-        ]),
-        dcc.Textarea(
-            id='memo-text', style={'width': '100%', 'height': '200px', 'resize': 'vertical'}),
-        html.Div(style={'marginTop': '6px', 'textAlign': 'right',
-                 'color': '#888', 'fontSize': '0.8rem'}, id='memo-status')
-    ]),
+    # footer는 패널 가림 방지를 위해 제거하거나 여기에 추가 가능
 ])
 
 # -----------------------------------------------------------------------------
@@ -873,10 +835,9 @@ def init_year_options(_):
     Output('kpi-cards', 'children'),
     Output('prev-years-kpi', 'children'),
     Output('kpi-refresh-status', 'children'),
-    Input('year-select', 'value'),
-    Input('data-version', 'data')  # 새로고침 트리거
+    Input('year-select', 'value')
 )
-def update_kpis(selected_year, _ver):
+def update_kpis(selected_year):
     ensure_data_loaded()
     df_d = DATA["daily"]
     df_m = DATA["monthly"]
@@ -932,40 +893,36 @@ def update_kpis(selected_year, _ver):
 @callback(
     Output('week-select-fixed', 'options'),
     Output('week-select-fixed', 'value'),
-    Input('year-select', 'value'),
-    Input('data-version', 'data')  # 새로고침 트리거
+    Input('year-select', 'value')
 )
-def refresh_week_options(_selected_year, _ver):
+def refresh_week_options(_selected_year):
     ensure_data_loaded()
     return DATA["week_options"], 'this_week'
 
 
 @callback(
     Output('weekly-chart-today', 'figure'),
-    Input('year-select', 'value'),
-    Input('data-version', 'data')  # 새로고침 트리거
+    Input('year-select', 'value')
 )
-def refresh_weekly_today(_selected_year, _ver):
+def refresh_weekly_today(_selected_year):
     ensure_data_loaded()
     return figure_weekly_today_based(DATA["daily"])
 
 
 @callback(
     Output('weekly-chart-fixed', 'figure'),
-    Input('week-select-fixed', 'value'),
-    Input('data-version', 'data')  # 새로고침 트리거
+    Input('week-select-fixed', 'value')
 )
-def update_week_fixed(monday_str, _ver):
+def update_week_fixed(monday_str):
     ensure_data_loaded()
     return figure_weekly_fixed_mon_fri(DATA["daily"], monday_str)
 
 
 @callback(
     Output('months-1to12-chart', 'figure'),
-    Input('year-select', 'value'),
-    Input('data-version', 'data')  # 새로고침 트리거
+    Input('year-select', 'value')
 )
-def refresh_month_chart(_selected_year, _ver):
+def refresh_month_chart(_selected_year):
     ensure_data_loaded()
     cy = datetime.now(KST).year
     return figure_months_1to12(DATA["monthly"], start_year=2022, current_year=cy)
@@ -974,10 +931,9 @@ def refresh_month_chart(_selected_year, _ver):
 @callback(
     Output("metric-tab-content", "children"),
     Input("metric-tabs", "value"),
-    Input("year-select", "value"),
-    Input('data-version', 'data')  # 새로고침 트리거
+    Input("year-select", "value")
 )
-def switch_metric_tab(tab_value, selected_year, _ver):
+def switch_metric_tab(tab_value, selected_year):
     ensure_data_loaded()
     figs = {
         "avg": yoy_line_value_bar_rate(DATA["monthly"], '일평균발주량', '월별 일평균 발주량 + YoY%', selected_year),
@@ -986,11 +942,9 @@ def switch_metric_tab(tab_value, selected_year, _ver):
         "color": yoy_line_value_bar_rate(DATA["monthly"], '컬러출력량', '월별 컬러 페이지 + YoY%', selected_year),
     }
     if tab_value == "forecast":
-        # 기존 코드에 forecast_cards_layout이 정의되어 있지 않아서,
-        # 안전하게 안내 문구를 출력합니다.
-        return html.Div(style={'padding': '12px'}, children=[
-            html.Div("연간 예측 탭은 준비 중입니다.", style={'color': '#666'})
-        ])
+        layout = forecast_cards_layout(
+            DATA["daily"], DATA["monthly"], selected_year)
+        return html.Div(style={'padding': '10px'}, children=[layout])
     fig = figs.get(tab_value, go.Figure())
     fig.update_layout(height=460)
     return dcc.Graph(figure=fig, style={'height': '480px'})
@@ -1001,114 +955,11 @@ def switch_metric_tab(tab_value, selected_year, _ver):
 @callback(
     Output('today-floating-panel', 'children'),
     Input('today-refresh', 'n_intervals'),
-    Input('data-version', 'data'),  # 새로고침 트리거
     prevent_initial_call=False
 )
-def refresh_today_panel(_n, _ver):
+def refresh_today_panel(_n):
     ensure_data_loaded()
     return build_today_panel(DATA["daily"])
-
-
-# ===== 새로고침 버튼: 캐시 리셋 후 재로딩 & 버전 증가 =====
-@callback(
-    Output('data-version', 'data'),
-    Output('last-refresh-stamp', 'children'),
-    Input('refresh-btn', 'n_clicks'),
-    State('data-version', 'data'),
-    prevent_initial_call=True
-)
-def force_reload(n, ver):
-    DATA["loaded"] = False  # 캐시 리셋
-    ensure_data_loaded()    # 즉시 재로딩
-    new_ver = (ver or 0) + 1
-    stamp = datetime.now(KST).strftime("최근 새로고침: %Y-%m-%d %H:%M:%S KST")
-    return new_ver, stamp
-
-
-# ===== 오늘 현황 표시/숨김 토글 =====
-@callback(
-    Output('today-floating-panel', 'style'),
-    Input('toggle-today-btn', 'n_clicks'),
-    State('today-visible', 'data'),
-    prevent_initial_call=False
-)
-def toggle_today_panel(n, visible):
-    # 초기 렌더: store 상태 반영
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        curr = True if visible is None else bool(visible)
-    else:
-        curr = not bool(visible)  # 버튼 클릭 시 토글(표시/숨김 반대)
-
-    base_style = {}
-    if curr:
-        # 표시: 컨테이너 자체는 스타일 없이, 내부 build_today_panel의 스타일 사용
-        return base_style
-    else:
-        # 숨김
-        return {'display': 'none'}
-
-
-@callback(
-    Output('today-visible', 'data'),
-    Input('toggle-today-btn', 'n_clicks'),
-    State('today-visible', 'data'),
-    prevent_initial_call=True
-)
-def persist_today_visible(n, visible):
-    return not bool(visible)
-
-
-# ===== 메모장 팝업 컨트롤 =====
-@callback(
-    Output('memo-popup', 'style'),
-    Output('memo-text', 'value'),
-    Output('memo-status', 'children'),
-    Input('memo-open-btn', 'n_clicks'),
-    Input('memo-close-btn', 'n_clicks'),
-    Input('memo-save-btn', 'n_clicks'),
-    Input('memo-clear-btn', 'n_clicks'),
-    State('memo-text', 'value'),
-    State('memo-storage', 'data'),
-    prevent_initial_call=False
-)
-def memo_controller(open_n, close_n, save_n, clear_n, text, stored):
-    style_base = {
-        'position': 'fixed', 'top': '80px', 'left': '16px', 'width': '360px', 'zIndex': '1000',
-        'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
-        'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '10px 12px',
-        'boxShadow': '0 10px 22px rgba(0,0,0,0.12)'
-    }
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        # 초기: 닫힘
-        return ({**style_base, 'display': 'none'}, stored or "", "")
-    trig = ctx.triggered[0]['prop_id'].split('.')[0]
-
-    if trig == 'memo-open-btn':
-        return ({**style_base, 'display': 'block'}, stored or "", "메모장을 열었습니다.")
-    if trig == 'memo-close-btn':
-        return ({**style_base, 'display': 'none'}, text or "", "메모장을 닫았습니다.")
-    if trig == 'memo-save-btn':
-        return ({**style_base, 'display': 'block'}, text or "", "저장 완료")
-    if trig == 'memo-clear-btn':
-        return ({**style_base, 'display': 'block'}, "", "모든 내용을 지웠습니다.")
-    return ({**style_base, 'display': 'none'}, stored or "", "")
-
-
-@callback(
-    Output('memo-storage', 'data'),
-    Input('memo-save-btn', 'n_clicks'),
-    Input('memo-clear-btn', 'n_clicks'),
-    State('memo-text', 'value'),
-    prevent_initial_call=True
-)
-def memo_storage_writer(save_n, clear_n, text):
-    ctx = dash.callback_context
-    trig = ctx.triggered[0]['prop_id'].split('.')[0]
-    if trig == 'memo-clear-btn':
-        return ""
-    return text or ""
 
 
 # -----------------------------------------------------------------------------
