@@ -49,7 +49,7 @@ def find_credentials_path():
 
 def open_sheet():
     scope = ['https://spreadsheets.google.com/feeds',
-             'https://www.googleapis.com/auth/drive']
+        'https://www.googleapis.com/auth/drive']
     creds_file = find_credentials_path()
     creds = ServiceAccountCredentials.from_json_keyfile_name(creds_file, scope)
     client = gspread.authorize(creds)
@@ -93,14 +93,27 @@ def load_data_from_gsheet():
 
     return df_daily_raw, df_monthly_raw
 
+# -----------------------------------------------------------------------------
+# 일/월 시트 정제
+# -----------------------------------------------------------------------------
+
 
 def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    반환 컬럼:
+      날짜, date_only, 연도, 월,
+      총발주종수, 총발주부수, 흑백페이지, 컬러페이지,
+      예상제본시간, 최종출고, 출고부수
+    """
     if df.empty:
-        return pd.DataFrame(columns=['날짜', '총발주부수', '흑백페이지', '컬러페이지', 'date_only', '연도', '월'])
+        return pd.DataFrame(columns=['날짜', 'date_only', '연도', '월',
+                                     '총발주종수', '총발주부수', '흑백페이지', '컬러페이지',
+                                     '예상제본시간', '최종출고', '출고부수'])
 
     d = df.copy()
     d = d.rename(columns={c: norm(c) for c in d.columns})
 
+    # 주요 열 후보 추정
     col_date = next((c for c in d.columns if c in [
                     '날짜', '날짜(년월일)', '일자', '날']), d.columns[0])
     col_cnt = next((c for c in d.columns if c in [
@@ -110,7 +123,12 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
     col_bw = next((c for c in d.columns if '흑백' in c), None)
     col_color = next((c for c in d.columns if ('컬러' in c or '칼라' in c)), None)
 
-    # 2025년 같은 헤더행을 연도 표지로 사용
+    # 오늘 패널에 필요한 부가 열
+    col_bind = next((c for c in d.columns if c in ['예상제본시간']), None)
+    col_shipt = next((c for c in d.columns if c in ['최종출고']), None)
+    col_ships = next((c for c in d.columns if c in ['출고부수']), None)
+
+    # "2025년" 같은 연도 표지 행 처리
     d['__year_header__'] = d[col_date].astype(str).str.extract(
         r'(^\s*(\d{4})\s*년\s*$)', expand=True)[1]
     d['__year_header__'] = d['__year_header__'].ffill()
@@ -135,6 +153,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
     d['날짜'] = pd.to_datetime(d['__full__'], errors='coerce', yearfirst=True)
     d = d.dropna(subset=['날짜']).copy()
 
+    # 공란일(추정) 제거 규칙: 주요 4개 숫자열이 모두 비어있으면 제거
     def is_blank(col):
         if col is None or col not in d.columns:
             return True
@@ -144,17 +163,38 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
         col_total) & is_blank(col_bw) & is_blank(col_color)
     d = d.loc[~blanks].copy()
 
-    for src, std in [(col_total, '총발주부수'), (col_bw, '흑백페이지'), (col_color, '컬러페이지')]:
-        if src and src in d.columns:
-            d[std] = pd.to_numeric(d[src].astype(str).str.replace(
-                ',', '', regex=False), errors='coerce').fillna(0)
-        else:
-            d[std] = 0
+    # 숫자열 표준화
+    def to_num(series):
+        return pd.to_numeric(series.astype(str).str.replace(',', '', regex=False), errors='coerce').fillna(0).astype(int)
+
+    d['총발주종수'] = to_num(d[col_cnt]) if (
+        col_cnt and col_cnt in d.columns) else 0
+    d['총발주부수'] = to_num(d[col_total]) if (
+        col_total and col_total in d.columns) else 0
+    d['흑백페이지'] = to_num(d[col_bw]) if (col_bw and col_bw in d.columns) else 0
+    d['컬러페이지'] = to_num(d[col_color]) if (
+        col_color and col_color in d.columns) else 0
+    d['출고부수'] = to_num(d[col_ships]) if (
+        col_ships and col_ships in d.columns) else 0
+
+    # 문자열/시간열 표준화(그대로 보존, 공백이면 "-")
+    def as_text(colname):
+        if colname and colname in d.columns:
+            s = d[colname].astype(str).str.strip()
+            s = s.where(~s.eq(''), '-')
+            return s
+        return '-'
+
+    d['예상제본시간'] = as_text(col_bind)
+    d['최종출고'] = as_text(col_shipt)
 
     d['date_only'] = d['날짜'].dt.date
     d['연도'] = d['날짜'].dt.year
     d['월'] = d['날짜'].dt.month
-    return d[['날짜', 'date_only', '연도', '월', '총발주부수', '흑백페이지', '컬러페이지']]
+
+    return d[['날짜', 'date_only', '연도', '월',
+              '총발주종수', '총발주부수', '흑백페이지', '컬러페이지',
+              '예상제본시간', '최종출고', '출고부수']]
 
 
 def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
@@ -168,16 +208,11 @@ def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {}
     for c in d.columns:
         n = norm(c)
-        if n == '발주량':
-            rename_map[c] = '발주량'
-        elif n == '발주일수':
-            rename_map[c] = '발주일수'
-        elif n == '일평균발주량':
-            rename_map[c] = '일평균발주량'
-        elif n == '흑백출력량':
-            rename_map[c] = '흑백출력량'
-        elif n in ['컬러출력량', '칼라출력량']:
-            rename_map[c] = '컬러출력량'
+        if n == '발주량': rename_map[c] = '발주량'
+        elif n == '발주일수': rename_map[c] = '발주일수'
+        elif n == '일평균발주량': rename_map[c] = '일평균발주량'
+        elif n == '흑백출력량': rename_map[c] = '흑백출력량'
+        elif n in ['컬러출력량', '칼라출력량']: rename_map[c] = '컬러출력량'
     d = d.rename(columns=rename_map)
 
     d[month_col] = d[month_col].astype(str).str.replace(' ', '')
@@ -303,14 +338,14 @@ def figure_weekly_today_based(df_daily: pd.DataFrame) -> go.Figure:
     this_week_dates = last_5_business_days_upto_today(now)
     last_week_dates = [d - timedelta(days=7) for d in this_week_dates]
     m = df_daily.set_index('date_only')[
-        '총발주부수'].to_dict() if not df_daily.empty else {}
+                           '총발주부수'].to_dict() if not df_daily.empty else {}
     y_this = [m.get(d, 0) for d in this_week_dates]
     y_last = [m.get(d, 0) for d in last_week_dates]
     x_week = [WEEKDAY_KR[pd.Timestamp(d).weekday()] for d in this_week_dates]
     this_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
-                      for d in this_week_dates]
+                                   for d in this_week_dates]
     last_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
-                      for d in last_week_dates]
+                                   for d in last_week_dates]
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=x_week, y=y_last, mode='lines+markers+text', name='지난 주',
@@ -345,13 +380,13 @@ def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None) 
     prev_week_days = [d - timedelta(days=7) for d in week_days]
 
     m = df_daily.set_index('date_only')[
-        '총발주부수'].to_dict() if not df_daily.empty else {}
+                           '총발주부수'].to_dict() if not df_daily.empty else {}
     y_this = [m.get(d, 0) for d in week_days]
     y_last = [m.get(d, 0) for d in prev_week_days]
     x_week = [WEEKDAY_KR[pd.Timestamp(d).weekday()] for d in week_days]
     this_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d') for d in week_days]
     last_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
-                      for d in prev_week_days]
+                                   for d in prev_week_days]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -388,7 +423,7 @@ def figure_months_1to12(df_monthly: pd.DataFrame, start_year=2022, current_year=
     fig = px.line(pivot, x=pivot.index, y=pivot.columns, markers=True,
                   title=f'월별 발주량 (1~12월, {start_year}~{current_year})')
     fig.update_layout(xaxis_title='', yaxis_title='발주량', template='plotly_white', height=300,
-                      margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
+        margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
     fig.update_xaxes(dtick=1)
     return fig
 
@@ -429,7 +464,7 @@ def yoy_line_value_bar_rate(d: pd.DataFrame, value_col: str, title: str, baselin
     return fig
 
 # -----------------------------------------------------------------------------
-# KPI/배지/예측
+# KPI/배지/예측/오늘패널
 # -----------------------------------------------------------------------------
 
 
@@ -567,8 +602,7 @@ def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int
             f"월별 가중 pace 대비 달성도: {prog['progress_vs_seasonal']:.1f}%", color_season, tip=tip_season))
 
     tip_ratio = (
-        f"올해 1/1~{prog['today']:%Y-%m-%d} 영업일 {prog['elapsed_biz_days']}/{prog['total_biz_days']}일 (주말·공휴일 제외)"
-    )
+        f"올해 1/1~{prog['today']:%Y-%m-%d} 영업일 {prog['elapsed_biz_days']}/{prog['total_biz_days']}일 (주말·공휴일 제외)")
     badges.append(
         badge(f"영업일 경과율: {prog['ratio_biz']*100:.1f}%", "#6c757d", tip=tip_ratio))
 
@@ -580,91 +614,71 @@ def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int
                     'alignItems': 'center', 'margin': '4px 2px 0'}, children=badges)
     return html.Div(children=[row1, row2, row3])
 
+# ===== 오늘 현황 패널 =====
 
-def forecast_totals(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int):
+
+def build_today_panel(df_daily: pd.DataFrame):
     today = datetime.now(KST).date()
-    ly = year - 1
+    if df_daily.empty or 'date_only' not in df_daily.columns:
+        body = html.Div("데이터를 불러오는 중이거나, 오늘 데이터가 없습니다.",
+                        style={'color': '#666'})
+    else:
+        row = df_daily[df_daily['date_only'] == today]
+        if row.empty:
+            body = html.Div([
+                html.Div("오늘 데이터가 아직 없습니다.", style={
+                         'color': '#666', 'marginBottom': '6px'})
+            ])
+        else:
+            r = row.iloc[0]
 
-    ytd_orders = df_daily[(df_daily['연도'] == year) & (
-        df_daily['date_only'] <= today)]['총발주부수'].sum()
-    ytd_bw = df_daily[(df_daily['연도'] == year) & (
-        df_daily['date_only'] <= today)]['흑백페이지'].sum()
-    ytd_color = df_daily[(df_daily['연도'] == year) & (
-        df_daily['date_only'] <= today)]['컬러페이지'].sum()
+            def fmt_int(x):
+                try:
+                    return f"{int(x):,}"
+                except Exception:
+                    return "0"
 
-    def biz_ratio_year(today_d: date) -> float:
-        hol = kr_holidays_for_year(today_d.year)
-        elapsed = business_days_in_range(
-            date(today_d.year, 1, 1), today_d, hol)
-        total = business_days_in_range(
-            date(today_d.year, 1, 1), date(today_d.year, 12, 31), hol)
-        return (elapsed/total) if total else 0.0
+            total_kinds = fmt_int(r.get('총발주종수', 0))
+            total_qty = fmt_int(r.get('총발주부수', 0))
+            bw_pages = fmt_int(r.get('흑백페이지', 0))
+            color_pages = fmt_int(r.get('컬러페이지', 0))
+            bind_time = (str(r.get('예상제본시간', '-')) or '-')
+            last_ship = (str(r.get('최종출고', '-')) or '-')
+            ship_qty = fmt_int(r.get('출고부수', 0))
 
-    ratio_biz_year = biz_ratio_year(today) or 1e-9
-    share_orders = seasonal_cum_share_to_date(
-        df_monthly, '발주량', ly, today) or None
-    share_bw = seasonal_cum_share_to_date(
-        df_monthly, '흑백출력량', ly, today) or None
-    share_color = seasonal_cum_share_to_date(
-        df_monthly, '컬러출력량', ly, today) or None
+            grid = html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr 1fr', 'rowGap': '6px', 'columnGap': '8px'}, children=[
+                html.Div("총 발주 종수", style={'color': '#666'}), html.Div(
+                    total_kinds, style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("총 발주 부수", style={'color': '#666'}), html.Div(
+                    total_qty,   style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("흑백 페이지",  style={'color': '#666'}), html.Div(
+                    bw_pages,    style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("컬러 페이지",  style={'color': '#666'}), html.Div(
+                    color_pages, style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("예상 제본 시간", style={'color': '#666'}), html.Div(
+                    bind_time, style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("최종 출고",    style={'color': '#666'}), html.Div(
+                    last_ship,   style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("출고 부수",    style={'color': '#666'}), html.Div(
+                    ship_qty,    style={'textAlign': 'right', 'fontWeight': '700'}),
+            ])
+            body = grid
 
-    def forecast(ytd, share):
-        if share and share > 0:
-            return ytd / share
-        return ytd / ratio_biz_year
+    header = html.Div([
+        html.Div("오늘 현황", style={'fontWeight': '800', 'fontSize': '1.05rem'}),
+        html.Div(datetime.now(KST).strftime("%Y-%m-%d (%a) %H:%M"),
+                 style={'color': '#888', 'fontSize': '0.8rem', 'marginTop': '2px'})
+    ])
 
-    f_orders = forecast(ytd_orders, share_orders)
-    f_bw = forecast(ytd_bw, share_bw)
-    f_color = forecast(ytd_color, share_color)
-
-    total_biz_days = total_business_days_in_year(year)
-    avg_per_bd = (f_orders / total_biz_days) if total_biz_days else 0.0
-
-    return {
-        'forecast_orders': int(round(f_orders)),
-        'forecast_bw': int(round(f_bw)),
-        'forecast_color': int(round(f_color)),
-        'forecast_avg_per_bd': round(avg_per_bd, 2),
-        'method_orders': '월별가중' if (share_orders and share_orders > 0) else '영업일pace',
-        'method_bw': '월별가중' if (share_bw and share_bw > 0) else '영업일pace',
-        'method_color': '월별가중' if (share_color and share_color > 0) else '영업일pace',
-    }
-
-
-def forecast_cards_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int):
-    fc = forecast_totals(df_daily, df_monthly, year)
-
-    def small_note(text):
-        return html.Div(text, style={'fontSize': '0.8rem', 'color': '#8a8a8a', 'marginTop': '4px'})
-    return html.Div(style={'display': 'flex', 'gap': '12px', 'flexWrap': 'wrap'}, children=[
-        html.Div(style={'flex': '1 1 260px', 'background': 'white', 'borderRadius': '14px', 'padding': '14px 16px', 'boxShadow': '0 6px 18px rgba(0,0,0,0.08)', 'minWidth': '240px'}, children=[
-            html.Div("올해 예상 발주량", style={
-                     'fontSize': '0.95rem', 'color': '#666', 'marginBottom': '6px', 'fontWeight': '600'}),
-            html.Div(f"{fc['forecast_orders']:,}", style={
-                     'fontSize': '1.8rem', 'fontWeight': '800'}),
-            small_note(f"방법: {fc['method_orders']} · 연말 예상 총합")
-        ]),
-        html.Div(style={'flex': '1 1 260px', 'background': 'white', 'borderRadius': '14px', 'padding': '14px 16px', 'boxShadow': '0 6px 18px rgba(0,0,0,0.08)', 'minWidth': '240px'}, children=[
-            html.Div("올해 예상 일평균 발주량(영업일)", style={
-                     'fontSize': '0.95rem', 'color': '#666', 'marginBottom': '6px', 'fontWeight': '600'}),
-            html.Div(f"{fc['forecast_avg_per_bd']:,}", style={
-                     'fontSize': '1.8rem', 'fontWeight': '800'}),
-            small_note("총 영업일 수로 나눈 예상 평균")
-        ]),
-        html.Div(style={'flex': '1 1 260px', 'background': 'white', 'borderRadius': '14px', 'padding': '14px 16px', 'boxShadow': '0 6px 18px rgba(0,0,0,0.08)', 'minWidth': '240px'}, children=[
-            html.Div("올해 예상 흑백 페이지", style={
-                     'fontSize': '0.95rem', 'color': '#666', 'marginBottom': '6px', 'fontWeight': '600'}),
-            html.Div(f"{fc['forecast_bw']:,}", style={
-                     'fontSize': '1.8rem', 'fontWeight': '800'}),
-            small_note(f"방법: {fc['method_bw']}")
-        ]),
-        html.Div(style={'flex': '1 1 260px', 'background': 'white', 'borderRadius': '14px', 'padding': '14px 16px', 'boxShadow': '0 6px 18px rgba(0,0,0,0.08)', 'minWidth': '240px'}, children=[
-            html.Div("올해 예상 컬러 페이지", style={
-                     'fontSize': '0.95rem', 'color': '#666', 'marginBottom': '6px', 'fontWeight': '600'}),
-            html.Div(f"{fc['forecast_color']:,}", style={
-                     'fontSize': '1.8rem', 'fontWeight': '800'}),
-            small_note(f"방법: {fc['method_color']}")
-        ]),
+    return html.Div(style={
+        'position': 'fixed', 'top': '80px', 'right': '16px', 'width': '310px', 'zIndex': '999',
+        'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
+        'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '12px 14px',
+        'boxShadow': '0 10px 22px rgba(0,0,0,0.12)'
+    }, children=[
+        header,
+        html.Hr(style={'margin': '8px 0', 'borderColor': '#f1f3f5'}),
+        body
     ])
 
 
@@ -678,7 +692,7 @@ external_stylesheets = [{
 app = dash.Dash(__name__,
                 title="발주량 분석 대시보드",
                 meta_tags=[{"name": "viewport",
-                            "content": "width=device-width, initial-scale=1"}],
+                    "content": "width=device-width, initial-scale=1"}],
                 external_stylesheets=external_stylesheets)
 server = app.server
 
@@ -687,7 +701,9 @@ CURRENT_YEAR = datetime.now(KST).year
 # 초기엔 빈 옵션/빈 그림으로 즉시 렌더 → Render 헬스체크 통과
 app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding': '16px', 'fontFamily': 'Noto Sans KR, Malgun Gothic, Arial'}, children=[
     dcc.Interval(id='init', interval=250, n_intervals=0,
-                 max_intervals=1),  # 최초 1회 데이터 로드 트리거
+                 max_intervals=1),  # 최초 1회 데이터 로드
+    dcc.Interval(id='today-refresh', interval=120*1000,
+                 n_intervals=0),     # 오늘 패널 2분마다 갱신
 
     html.H1("발주량 분석 대시보드", style={
             'textAlign': 'center', 'marginBottom': '6px'}),
@@ -698,7 +714,7 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
         html.Span("KPI 연도 선택:", style={'fontWeight': '600'}),
         dcc.Dropdown(id='year-select',
                      options=[{'label': f'{CURRENT_YEAR}년',
-                               'value': CURRENT_YEAR}],  # 임시
+                         'value': CURRENT_YEAR}],  # 임시
                      value=CURRENT_YEAR, clearable=False, style={'width': '220px'}),
         html.Div(id='kpi-refresh-status',
                  style={'marginLeft': '12px', 'color': '#888'})
@@ -749,8 +765,10 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
         html.Div(id="metric-tab-content", style={'padding': '8px 4px'})
     ]),
 
-    html.Div(style={'textAlign': 'center', 'color': '#888',
-             'marginTop': '16px', 'fontSize': '.9rem'}, children="© 2025 발주량 분석 대시보드")
+    # 화면 오른쪽 고정 "오늘 현황" 패널
+    html.Div(id='today-floating-panel')
+
+    # footer는 패널 가림 방지를 위해 제거하거나 여기에 추가 가능
 ])
 
 # -----------------------------------------------------------------------------
@@ -781,7 +799,6 @@ def ensure_data_loaded():
         DATA["loaded"] = True
         print("[INFO] Data loaded successfully.")
     except Exception as e:
-        # 실패 시에도 앱은 즉시 응답해야 하므로, 빈값으로 마킹
         print("[ERROR] 데이터 로드 실패:", e)
         DATA["daily"] = pd.DataFrame()
         DATA["monthly"] = pd.DataFrame()
@@ -789,10 +806,10 @@ def ensure_data_loaded():
             {'label': f'{CURRENT_YEAR}년', 'value': CURRENT_YEAR}]
         DATA["week_options"] = [
             {'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}]
-        DATA["loaded"] = True  # 실패 플래그지만 이후 콜백은 빈 데이터로 동작
+        DATA["loaded"] = True  # 실패해도 앱은 동작
 
 # -----------------------------------------------------------------------------
-# 콜백 (초기 로드 → 옵션/그림/표 갱신)
+# 콜백
 # -----------------------------------------------------------------------------
 
 
@@ -805,7 +822,6 @@ def ensure_data_loaded():
 def init_year_options(_):
     ensure_data_loaded()
     opts = DATA["years_options"]
-    # 최신 연도 선택(존재하면)
     latest = max([o['value'] for o in opts]) if opts else CURRENT_YEAR
     return opts, latest
 
@@ -830,16 +846,12 @@ def update_kpis(selected_year):
 
             td_year_style = {
                 'textAlign': 'left', 'padding': '6px 8px', 'borderBottom': '1px solid #f1f3f5'}
-            td_num_style = {
-                'textAlign': 'right', 'padding': '6px 8px', 'borderBottom': '1px solid #f1f3f5',
-                'fontVariantNumeric': 'tabular-nums', 'whiteSpace': 'nowrap'
-            }
+            td_num_style = {'textAlign': 'right', 'padding': '6px 8px', 'borderBottom': '1px solid #f1f3f5',
+                             'fontVariantNumeric': 'tabular-nums', 'whiteSpace': 'nowrap'}
             th_year_style = {'textAlign': 'left', 'padding': '6px 8px',
-                             'borderBottom': '2px solid #dee2e6', 'color': '#495057'}
-            th_num_style = {
-                'textAlign': 'right', 'padding': '6px 8px', 'borderBottom': '2px solid #dee2e6', 'color': '#495057',
-                'fontVariantNumeric': 'tabular-nums', 'whiteSpace': 'nowrap'
-            }
+                'borderBottom': '2px solid #dee2e6', 'color': '#495057'}
+            th_num_style = {'textAlign': 'right', 'padding': '6px 8px', 'borderBottom': '2px solid #dee2e6', 'color': '#495057',
+                             'fontVariantNumeric': 'tabular-nums', 'whiteSpace': 'nowrap'}
 
             rows = []
             for y in years:
@@ -863,7 +875,7 @@ def update_kpis(selected_year):
             prev_tbl = html.Table(
                 [header] + rows,
                 style={'width': '100%', 'borderCollapse': 'collapse',
-                       'tableLayout': 'fixed'},
+                    'tableLayout': 'fixed'},
                 className="kpi-table"
             )
 
@@ -921,23 +933,31 @@ def switch_metric_tab(tab_value, selected_year):
     figs = {
         "avg": yoy_line_value_bar_rate(DATA["monthly"], '일평균발주량', '월별 일평균 발주량 + YoY%', selected_year),
         "total": yoy_line_value_bar_rate(DATA["monthly"], '발주량', '월 총 발주량 + YoY%', selected_year),
-        "bw": yoy_line_value_bar_rate(DATA["monthly"], '흑백출력량', '월별 흑백 페이지 + YoY%', selected_year),
+        "bw": yoy_line_value_bar_rate(DATA["monthly'], '흑백출력량', '월별 흑백 페이지 + YoY%', selected_year),
         "color": yoy_line_value_bar_rate(DATA["monthly"], '컬러출력량', '월별 컬러 페이지 + YoY%', selected_year),
     }
     if tab_value == "forecast":
-        layout = forecast_cards_layout(
-            DATA["daily"], DATA["monthly"], selected_year)
-        return html.Div(style={'padding': '10px'}, children=[layout])
+        layout = forecast_cards_layout(DATA["daily"], DATA["monthly"], selected_year)
+        return html.Div(style={'padding':'10px'}, children=[layout])
     fig = figs.get(tab_value, go.Figure())
     fig.update_layout(height=460)
-    return dcc.Graph(figure=fig, style={'height': '480px'})
+    return dcc.Graph(figure=fig, style={'height':'480px'})
 
+# 오늘 패널 갱신 (초기 + 2분 주기)
+@callback(
+    Output('today-floating-panel', 'children'),
+    Input('today-refresh', 'n_intervals'),
+    prevent_initial_call=False
+)
+def refresh_today_panel(_n):
+    ensure_data_loaded()
+    return build_today_panel(DATA["daily"])
 
 # -----------------------------------------------------------------------------
 # 로컬 개발 실행
 # -----------------------------------------------------------------------------
 if __name__ == '__main__':
-    host = os.getenv('DASH_HOST', '127.0.0.1')
-    port = int(os.getenv('DASH_PORT', '8090'))
+    host = os.getenv('DASH_HOST','127.0.0.1')
+    port = int(os.getenv('DASH_PORT','8090'))
     print(f"브라우저에서 http://{host}:{port} 으로 접속하세요.")
     app.run(debug=True, host=host, port=port)
