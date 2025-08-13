@@ -49,7 +49,7 @@ def find_credentials_path():
 
 def open_sheet():
     scope = ['https://spreadsheets.google.com/feeds',
-        'https://www.googleapis.com/auth/drive']
+             'https://www.googleapis.com/auth/drive']
     creds_file = find_credentials_path()
     creds = ServiceAccountCredentials.from_json_keyfile_name(creds_file, scope)
     client = gspread.authorize(creds)
@@ -208,11 +208,16 @@ def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {}
     for c in d.columns:
         n = norm(c)
-        if n == '발주량': rename_map[c] = '발주량'
-        elif n == '발주일수': rename_map[c] = '발주일수'
-        elif n == '일평균발주량': rename_map[c] = '일평균발주량'
-        elif n == '흑백출력량': rename_map[c] = '흑백출력량'
-        elif n in ['컬러출력량', '칼라출력량']: rename_map[c] = '컬러출력량'
+        if n == '발주량':
+            rename_map[c] = '발주량'
+        elif n == '발주일수':
+            rename_map[c] = '발주일수'
+        elif n == '일평균발주량':
+            rename_map[c] = '일평균발주량'
+        elif n == '흑백출력량':
+            rename_map[c] = '흑백출력량'
+        elif n in ['컬러출력량', '칼라출력량']:
+            rename_map[c] = '컬러출력량'
     d = d.rename(columns=rename_map)
 
     d[month_col] = d[month_col].astype(str).str.replace(' ', '')
@@ -338,14 +343,14 @@ def figure_weekly_today_based(df_daily: pd.DataFrame) -> go.Figure:
     this_week_dates = last_5_business_days_upto_today(now)
     last_week_dates = [d - timedelta(days=7) for d in this_week_dates]
     m = df_daily.set_index('date_only')[
-                           '총발주부수'].to_dict() if not df_daily.empty else {}
+        '총발주부수'].to_dict() if not df_daily.empty else {}
     y_this = [m.get(d, 0) for d in this_week_dates]
     y_last = [m.get(d, 0) for d in last_week_dates]
     x_week = [WEEKDAY_KR[pd.Timestamp(d).weekday()] for d in this_week_dates]
     this_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
-                                   for d in this_week_dates]
+                      for d in this_week_dates]
     last_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
-                                   for d in last_week_dates]
+                      for d in last_week_dates]
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=x_week, y=y_last, mode='lines+markers+text', name='지난 주',
@@ -380,13 +385,13 @@ def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None) 
     prev_week_days = [d - timedelta(days=7) for d in week_days]
 
     m = df_daily.set_index('date_only')[
-                           '총발주부수'].to_dict() if not df_daily.empty else {}
+        '총발주부수'].to_dict() if not df_daily.empty else {}
     y_this = [m.get(d, 0) for d in week_days]
     y_last = [m.get(d, 0) for d in prev_week_days]
     x_week = [WEEKDAY_KR[pd.Timestamp(d).weekday()] for d in week_days]
     this_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d') for d in week_days]
     last_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
-                                   for d in prev_week_days]
+                      for d in prev_week_days]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -423,7 +428,7 @@ def figure_months_1to12(df_monthly: pd.DataFrame, start_year=2022, current_year=
     fig = px.line(pivot, x=pivot.index, y=pivot.columns, markers=True,
                   title=f'월별 발주량 (1~12월, {start_year}~{current_year})')
     fig.update_layout(xaxis_title='', yaxis_title='발주량', template='plotly_white', height=300,
-        margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
+                      margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
     fig.update_xaxes(dtick=1)
     return fig
 
@@ -692,7 +697,7 @@ external_stylesheets = [{
 app = dash.Dash(__name__,
                 title="발주량 분석 대시보드",
                 meta_tags=[{"name": "viewport",
-                    "content": "width=device-width, initial-scale=1"}],
+                            "content": "width=device-width, initial-scale=1"}],
                 external_stylesheets=external_stylesheets)
 server = app.server
 
@@ -714,7 +719,7 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
         html.Span("KPI 연도 선택:", style={'fontWeight': '600'}),
         dcc.Dropdown(id='year-select',
                      options=[{'label': f'{CURRENT_YEAR}년',
-                         'value': CURRENT_YEAR}],  # 임시
+                               'value': CURRENT_YEAR}],  # 임시
                      value=CURRENT_YEAR, clearable=False, style={'width': '220px'}),
         html.Div(id='kpi-refresh-status',
                  style={'marginLeft': '12px', 'color': '#888'})
@@ -847,11 +852,11 @@ def update_kpis(selected_year):
             td_year_style = {
                 'textAlign': 'left', 'padding': '6px 8px', 'borderBottom': '1px solid #f1f3f5'}
             td_num_style = {'textAlign': 'right', 'padding': '6px 8px', 'borderBottom': '1px solid #f1f3f5',
-                             'fontVariantNumeric': 'tabular-nums', 'whiteSpace': 'nowrap'}
+                            'fontVariantNumeric': 'tabular-nums', 'whiteSpace': 'nowrap'}
             th_year_style = {'textAlign': 'left', 'padding': '6px 8px',
-                'borderBottom': '2px solid #dee2e6', 'color': '#495057'}
+                             'borderBottom': '2px solid #dee2e6', 'color': '#495057'}
             th_num_style = {'textAlign': 'right', 'padding': '6px 8px', 'borderBottom': '2px solid #dee2e6', 'color': '#495057',
-                             'fontVariantNumeric': 'tabular-nums', 'whiteSpace': 'nowrap'}
+                            'fontVariantNumeric': 'tabular-nums', 'whiteSpace': 'nowrap'}
 
             rows = []
             for y in years:
@@ -875,7 +880,7 @@ def update_kpis(selected_year):
             prev_tbl = html.Table(
                 [header] + rows,
                 style={'width': '100%', 'borderCollapse': 'collapse',
-                    'tableLayout': 'fixed'},
+                       'tableLayout': 'fixed'},
                 className="kpi-table"
             )
 
@@ -933,17 +938,20 @@ def switch_metric_tab(tab_value, selected_year):
     figs = {
         "avg": yoy_line_value_bar_rate(DATA["monthly"], '일평균발주량', '월별 일평균 발주량 + YoY%', selected_year),
         "total": yoy_line_value_bar_rate(DATA["monthly"], '발주량', '월 총 발주량 + YoY%', selected_year),
-        "bw": yoy_line_value_bar_rate(DATA["monthly'], '흑백출력량', '월별 흑백 페이지 + YoY%', selected_year),
+        "bw": yoy_line_value_bar_rate(DATA["monthly"], '흑백출력량', '월별 흑백 페이지 + YoY%', selected_year),
         "color": yoy_line_value_bar_rate(DATA["monthly"], '컬러출력량', '월별 컬러 페이지 + YoY%', selected_year),
     }
     if tab_value == "forecast":
-        layout = forecast_cards_layout(DATA["daily"], DATA["monthly"], selected_year)
-        return html.Div(style={'padding':'10px'}, children=[layout])
+        layout = forecast_cards_layout(
+            DATA["daily"], DATA["monthly"], selected_year)
+        return html.Div(style={'padding': '10px'}, children=[layout])
     fig = figs.get(tab_value, go.Figure())
     fig.update_layout(height=460)
-    return dcc.Graph(figure=fig, style={'height':'480px'})
+    return dcc.Graph(figure=fig, style={'height': '480px'})
 
 # 오늘 패널 갱신 (초기 + 2분 주기)
+
+
 @callback(
     Output('today-floating-panel', 'children'),
     Input('today-refresh', 'n_intervals'),
@@ -953,11 +961,12 @@ def refresh_today_panel(_n):
     ensure_data_loaded()
     return build_today_panel(DATA["daily"])
 
+
 # -----------------------------------------------------------------------------
 # 로컬 개발 실행
 # -----------------------------------------------------------------------------
 if __name__ == '__main__':
-    host = os.getenv('DASH_HOST','127.0.0.1')
-    port = int(os.getenv('DASH_PORT','8090'))
+    host = os.getenv('DASH_HOST', '127.0.0.1')
+    port = int(os.getenv('DASH_PORT', '8090'))
     print(f"브라우저에서 http://{host}:{port} 으로 접속하세요.")
     app.run(debug=True, host=host, port=port)
