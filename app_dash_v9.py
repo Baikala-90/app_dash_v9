@@ -8,7 +8,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 import dash
-from dash import dcc, html, Input, Output, callback
+from dash import dcc, html, Input, Output, State, callback
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -18,9 +18,9 @@ import pytz
 load_dotenv()
 KST = pytz.timezone('Asia/Seoul')
 
-# -----------------------------
-# Utils
-# -----------------------------
+# -----------------------------------------------------------------------------
+# 공통 유틸
+# -----------------------------------------------------------------------------
 
 
 def norm(s: str) -> str:
@@ -35,7 +35,16 @@ def find_credentials_path():
         if p and os.path.exists(p):
             print(f"[INFO] Using credentials: {p}")
             return p
-    raise FileNotFoundError("서비스 계정 JSON이 필요합니다. (credentials.json 또는 env 경로)")
+    # env로 JSON 본문을 넣은 경우(선택)
+    content = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if content:
+        path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"[INFO] Created credentials from env -> {path}")
+        return path
+    raise FileNotFoundError(
+        "서비스 계정 JSON이 필요합니다. (credentials.json 또는 GOOGLE_APPLICATION_CREDENTIALS)")
 
 
 def open_sheet():
@@ -50,9 +59,17 @@ def open_sheet():
         raise EnvironmentError("SPREADSHEET_URL이 .env/환경변수에 없습니다.")
     return client.open_by_url(url)
 
-# -----------------------------
-# Load
-# -----------------------------
+
+# -----------------------------------------------------------------------------
+# 데이터 로드 (지연 로딩을 위한 전역 캐시)
+# -----------------------------------------------------------------------------
+DATA = {
+    "loaded": False,
+    "daily": pd.DataFrame(),
+    "monthly": pd.DataFrame(),
+    "years_options": [],
+    "week_options": []
+}
 
 
 def load_data_from_gsheet():
@@ -75,10 +92,6 @@ def load_data_from_gsheet():
     df_monthly_raw = pd.DataFrame(vals_m[mi+1:], columns=headers_m)
 
     return df_daily_raw, df_monthly_raw
-
-# -----------------------------
-# Cleanse
-# -----------------------------
 
 
 def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
@@ -182,19 +195,18 @@ def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
     d['월번호'] = d['월DT'].dt.month
     return d[['월DT', '연도', '월번호', '발주량', '발주일수', '일평균발주량', '흑백출력량', '컬러출력량']]
 
-# -----------------------------
-# Business days & holiday logic
-# -----------------------------
+# -----------------------------------------------------------------------------
+# 영업일/공휴일/월별 가중
+# -----------------------------------------------------------------------------
 
 
 def kr_holidays_for_year(year: int):
-    """한국 공휴일 집합 반환. 'holidays' 패키지가 없으면 주말만 제외로 폴백."""
     try:
         import holidays  # type: ignore
         kr = holidays.KR(years=year)
         return set(kr.keys())
     except Exception as e:
-        print(f"[WARN] 'holidays' 패키지를 사용할 수 없습니다: {e}. 주말만 제외하여 영업일 계산합니다.")
+        print(f"[WARN] 'holidays' 사용 불가: {e}. 주말만 제외합니다.")
         return set()
 
 
@@ -227,10 +239,6 @@ def total_business_days_in_year(year: int) -> int:
     end_year = date(year, 12, 31)
     return business_days_in_range(start, end_year, hol)
 
-# -----------------------------
-# Seasonal (월별 가중) pace helpers
-# -----------------------------
-
 
 def monthly_share_series(df_monthly: pd.DataFrame, year: int, value_col: str) -> pd.Series:
     d = df_monthly[df_monthly['연도'] == year]
@@ -245,8 +253,7 @@ def monthly_share_series(df_monthly: pd.DataFrame, year: int, value_col: str) ->
 
 
 def seasonal_cum_share_to_date(df_monthly: pd.DataFrame, value_col: str, last_year: int, today: date) -> float:
-    shares = monthly_share_series(
-        df_monthly, last_year, value_col)  # index 1..12
+    shares = monthly_share_series(df_monthly, last_year, value_col)
     if shares.sum() == 0:
         return 0.0
     m = today.month
@@ -255,9 +262,9 @@ def seasonal_cum_share_to_date(df_monthly: pd.DataFrame, value_col: str, last_ye
     return float(full_share + part)
 
 
-# -----------------------------
-# Figures
-# -----------------------------
+# -----------------------------------------------------------------------------
+# 주간/월별/YoY 그림
+# -----------------------------------------------------------------------------
 WEEKDAY_KR = ['월', '화', '수', '목', '금', '토', '일']
 
 
@@ -334,7 +341,7 @@ def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None) 
     else:
         base_mon = monday(datetime.now(KST).date())
 
-    week_days = [base_mon + timedelta(days=i) for i in range(5)]  # Mon..Fri
+    week_days = [base_mon + timedelta(days=i) for i in range(5)]
     prev_week_days = [d - timedelta(days=7) for d in week_days]
 
     m = df_daily.set_index('date_only')[
@@ -421,33 +428,9 @@ def yoy_line_value_bar_rate(d: pd.DataFrame, value_col: str, title: str, baselin
     fig.update_xaxes(dtick=1)
     return fig
 
-
-def build_metric_figs(df_monthly: pd.DataFrame, baseline_year: int):
-    d = df_monthly[(df_monthly['연도'] >= 2022) & (
-        df_monthly['연도'] <= baseline_year)].copy()
-    if '흑백출력량' not in d.columns:
-        alt_bw = next((c for c in d.columns if '흑백' in c), None)
-        if alt_bw:
-            d = d.rename(columns={alt_bw: '흑백출력량'})
-        else:
-            d['흑백출력량'] = 0
-    if '컬러출력량' not in d.columns:
-        alt_c = next((c for c in d.columns if ('컬러' in c or '칼라' in c)), None)
-        if alt_c:
-            d = d.rename(columns={alt_c: '컬러출력량'})
-        else:
-            d['컬러출력량'] = 0
-
-    return {
-        'avg_per_day': yoy_line_value_bar_rate(d, '일평균발주량', '월별 일평균 발주량 + YoY%', baseline_year),
-        'monthly_total': yoy_line_value_bar_rate(d, '발주량', '월 총 발주량 + YoY%', baseline_year),
-        'bw_pages': yoy_line_value_bar_rate(d, '흑백출력량', '월별 흑백 페이지 + YoY%', baseline_year),
-        'color_pages': yoy_line_value_bar_rate(d, '컬러출력량', '월별 컬러 페이지 + YoY%', baseline_year),
-    }
-
-# -----------------------------
-# KPI + Advanced progress
-# -----------------------------
+# -----------------------------------------------------------------------------
+# KPI/배지/예측
+# -----------------------------------------------------------------------------
 
 
 def compute_kpis(df_daily: pd.DataFrame, year: int):
@@ -475,16 +458,9 @@ def safe_same_date_last_year(today: date) -> date:
 
 
 def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int):
-    """
-    Returns dict:
-      ytd_curr, ytd_ly, last_year_total,
-      ratio_biz, progress_vs_biz, seasonal_share_to_date, progress_vs_seasonal,
-      elapsed_biz_days, total_biz_days, today, same_date_ly
-    """
     today = datetime.now(KST).date()
     ly = year - 1
 
-    # YTD
     ytd_curr = df_daily[(df_daily['연도'] == year) & (
         df_daily['date_only'] <= today)]['총발주부수'].sum()
     same_date_ly = safe_same_date_last_year(today)
@@ -492,7 +468,6 @@ def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, 
         df_daily['date_only'] <= same_date_ly)]['총발주부수'].sum()
     last_year_total = df_daily[df_daily['연도'] == ly]['총발주부수'].sum()
 
-    # 영업일 경과율 (주말+KR 공휴일 제외)
     hol = kr_holidays_for_year(year)
     elapsed_biz_days = business_days_in_range(date(year, 1, 1), today, hol)
     total_biz_days = business_days_in_range(
@@ -502,9 +477,7 @@ def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, 
     target_biz = last_year_total * ratio_biz if last_year_total else 0
     progress_vs_biz = (ytd_curr / target_biz * 100) if target_biz else None
 
-    # 월별 가중 pace (작년 월분포)
-    seasonal_share = seasonal_cum_share_to_date(
-        df_monthly, '발주량', ly, today)  # 0~1
+    seasonal_share = seasonal_cum_share_to_date(df_monthly, '발주량', ly, today)
     target_seasonal = last_year_total * seasonal_share if last_year_total else 0
     progress_vs_seasonal = (ytd_curr / target_seasonal *
                             100) if target_seasonal else None
@@ -527,11 +500,10 @@ def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, 
 def badge(text, color="#2b8a3e", tip=None):
     return html.Span(
         text,
-        title=tip,  # 마우스 오버 시 브라우저 기본 툴팁
+        title=tip,
         style={
             'display': 'inline-block', 'padding': '4px 8px', 'borderRadius': '999px',
-            'background': color, 'color': 'white', 'fontSize': '0.8rem', 'fontWeight': '700',
-            'cursor': 'help'
+            'background': color, 'color': 'white', 'fontSize': '0.8rem', 'fontWeight': '700', 'cursor': 'help'
         }
     )
 
@@ -551,24 +523,21 @@ def kpi_card(title, value, subtitle):
 
 def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int):
     tot, avg, days, bw, color = compute_kpis(df_daily, year)
-    # 1행: 총/평균/일수
+
     row1 = html.Div(style={'display': 'flex', 'gap': '12px', 'flexWrap': 'wrap', 'marginBottom': '8px'}, children=[
         kpi_card(f"{year}년 총 발주량", f"{tot:,}", "Total Orders"),
         kpi_card(f"{year}년 일 평균 발주량", f"{avg:,}", "Avg / Working Day"),
         kpi_card(f"{year}년 총 발주 일수", f"{days:,}일", "Working Days Count"),
     ])
-    # 2행: 흑백/컬러 (항상 아래 고정)
+
     row2 = html.Div(style={'display': 'flex', 'gap': '12px', 'flexWrap': 'wrap', 'marginBottom': '6px'}, children=[
         kpi_card(f"{year}년 흑백 페이지 합계", f"{bw:,}", "BW Pages (Daily sum)"),
         kpi_card(f"{year}년 컬러 페이지 합계", f"{color:,}",
                  "Color Pages (Daily sum)"),
     ])
 
-    # 3행: 고급 경과율 배지 (툴팁 포함)
     prog = compute_progress_advanced(df_daily, df_monthly, year)
     badges = []
-
-    # (1) YTD vs 작년 동기간
     if prog['ytd_ly']:
         ytd_vs_ly = prog['ytd_curr'] / prog['ytd_ly'] * 100
         tip_ytd = (
@@ -578,7 +547,6 @@ def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int
         badges.append(
             badge(f"YTD vs 작년 동기간: {ytd_vs_ly:.1f}%", "#0b7285", tip=tip_ytd))
 
-    # (2) 경과율(영업일) 대비 달성도
     if prog['progress_vs_biz'] is not None:
         color_biz = "#2b8a3e" if prog['progress_vs_biz'] >= 100 else "#d9480f"
         tip_biz = (
@@ -589,7 +557,6 @@ def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int
         badges.append(badge(
             f"경과율(영업일) 대비 달성도: {prog['progress_vs_biz']:.1f}%", color_biz, tip=tip_biz))
 
-    # (3) 월별 가중 pace 대비 달성도
     if prog['progress_vs_seasonal'] is not None:
         color_season = "#2b8a3e" if prog['progress_vs_seasonal'] >= 100 else "#d9480f"
         tip_season = (
@@ -599,38 +566,25 @@ def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int
         badges.append(badge(
             f"월별 가중 pace 대비 달성도: {prog['progress_vs_seasonal']:.1f}%", color_season, tip=tip_season))
 
-    # (4) 영업일 경과율
     tip_ratio = (
-        f"올해 1/1~{prog['today']:%Y-%m-%d} 영업일 {prog['elapsed_biz_days']}/{prog['total_biz_days']}일 "
-        f"(주말·공휴일 제외)"
+        f"올해 1/1~{prog['today']:%Y-%m-%d} 영업일 {prog['elapsed_biz_days']}/{prog['total_biz_days']}일 (주말·공휴일 제외)"
     )
     badges.append(
         badge(f"영업일 경과율: {prog['ratio_biz']*100:.1f}%", "#6c757d", tip=tip_ratio))
 
-    # (5) 월별 가중 누적비중
-    tip_share = (
-        "작년 월별 연간 비중 누적치. 전월 100% 반영 + "
-        "이번 달 비중 × 이번 달 영업일 진행률"
-    )
+    tip_share = ("작년 월별 연간 비중 누적치 = 전월까지 100% + (이번 달 비중 × 이번 달 영업일 진행률)")
     badges.append(badge(
         f"월별 가중 누적비중: {prog['seasonal_share_to_date']*100:.1f}%", "#6c757d", tip=tip_share))
 
     row3 = html.Div(style={'display': 'flex', 'gap': '8px', 'flexWrap': 'wrap',
                     'alignItems': 'center', 'margin': '4px 2px 0'}, children=badges)
-
     return html.Div(children=[row1, row2, row3])
-
-# -----------------------------
-# Forecast (연간 예측) 탭
-# -----------------------------
 
 
 def forecast_totals(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int):
-    """연말 예상: 주문/흑백/컬러 및 영업일 기준 일평균."""
     today = datetime.now(KST).date()
     ly = year - 1
 
-    # YTD 실제
     ytd_orders = df_daily[(df_daily['연도'] == year) & (
         df_daily['date_only'] <= today)]['총발주부수'].sum()
     ytd_bw = df_daily[(df_daily['연도'] == year) & (
@@ -638,7 +592,6 @@ def forecast_totals(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int)
     ytd_color = df_daily[(df_daily['연도'] == year) & (
         df_daily['date_only'] <= today)]['컬러페이지'].sum()
 
-    # 비중/경과
     def biz_ratio_year(today_d: date) -> float:
         hol = kr_holidays_for_year(today_d.year)
         elapsed = business_days_in_range(
@@ -715,9 +668,9 @@ def forecast_cards_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year
     ])
 
 
-# -----------------------------
-# App
-# -----------------------------
+# -----------------------------------------------------------------------------
+# 앱 (지연 로딩 레이아웃)
+# -----------------------------------------------------------------------------
 external_stylesheets = [{
     "href": "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css",
     "rel": "stylesheet"
@@ -729,35 +682,13 @@ app = dash.Dash(__name__,
                 external_stylesheets=external_stylesheets)
 server = app.server
 
-# 데이터 로드
-try:
-    _raw_daily, _raw_monthly = load_data_from_gsheet()
-except Exception as e:
-    print("[ERROR] 시트 로드 실패:", e)
-    _raw_daily, _raw_monthly = pd.DataFrame(), pd.DataFrame()
-
-DF_DAILY = cleanse_daily(_raw_daily)
-DF_MONTHLY = cleanse_monthly(_raw_monthly)
-
 CURRENT_YEAR = datetime.now(KST).year
-years_options = [{'label': f'{int(y)}년', 'value': int(y)} for y in sorted(
-    DF_DAILY['연도'].unique()) if int(y) <= CURRENT_YEAR] if not DF_DAILY.empty else []
 
-# Charts
-fig_week_today = figure_weekly_today_based(
-    DF_DAILY) if not DF_DAILY.empty else go.Figure()
-fig_months = figure_months_1to12(
-    DF_MONTHLY, start_year=2022, current_year=CURRENT_YEAR) if not DF_MONTHLY.empty else go.Figure()
-metric_figs = build_metric_figs(DF_MONTHLY, baseline_year=CURRENT_YEAR) if not DF_MONTHLY.empty else {
-    'avg_per_day': go.Figure(), 'monthly_total': go.Figure(), 'bw_pages': go.Figure(), 'color_pages': go.Figure()}
+# 초기엔 빈 옵션/빈 그림으로 즉시 렌더 → Render 헬스체크 통과
+app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding': '16px', 'fontFamily': 'Noto Sans KR, Malgun Gothic, Arial'}, children=[
+    dcc.Interval(id='init', interval=250, n_intervals=0,
+                 max_intervals=1),  # 최초 1회 데이터 로드 트리거
 
-week_options = week_options_from_df(DF_DAILY)
-
-BASE_STYLE = {'fontFamily': 'Noto Sans KR, Malgun Gothic, Arial'}
-CARD_STYLE = {'background': 'white', 'borderRadius': '12px',
-              'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}
-
-app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding': '16px', **BASE_STYLE}, children=[
     html.H1("발주량 분석 대시보드", style={
             'textAlign': 'center', 'marginBottom': '6px'}),
     html.P("구글 시트 데이터 기반 · 2021~현재", style={
@@ -765,10 +696,10 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
 
     html.Div(style={'display': 'flex', 'gap': '10px', 'justifyContent': 'center', 'alignItems': 'center', 'marginBottom': '8px'}, children=[
         html.Span("KPI 연도 선택:", style={'fontWeight': '600'}),
-        dcc.Dropdown(id='year-select', options=years_options,
-                     value=(years_options[-1]['value']
-                            if years_options else CURRENT_YEAR),
-                     clearable=False, style={'width': '220px'}),
+        dcc.Dropdown(id='year-select',
+                     options=[{'label': f'{CURRENT_YEAR}년',
+                               'value': CURRENT_YEAR}],  # 임시
+                     value=CURRENT_YEAR, clearable=False, style={'width': '220px'}),
         html.Div(id='kpi-refresh-status',
                  style={'marginLeft': '12px', 'color': '#888'})
     ]),
@@ -778,7 +709,7 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
     html.Details(open=False, children=[
         html.Summary("지난 연도 KPI 펼치기 / 접기"),
         html.Div(id='prev-years-kpi', style={'marginTop': '8px'})
-    ], style={**CARD_STYLE, 'marginBottom': '16px'}),
+    ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '16px'}),
 
     html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr', 'gap': '12px', 'marginBottom': '12px'}, children=[
         html.Div([
@@ -786,27 +717,28 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
                 html.H3("주간 발주량 비교 (오늘 기준 5영업일 + 지난주 같은 요일)",
                         style={'marginBottom': '4px', 'fontSize': '1.05rem'}),
             ]),
-            dcc.Graph(id='weekly-chart-today', figure=fig_week_today,
+            dcc.Graph(id='weekly-chart-today', figure=go.Figure(),
                       style={'height': '300px'})
-        ], style=CARD_STYLE),
+        ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}),
     ]),
 
     html.Details(open=False, children=[
         html.Summary("월~금 고정 주간 비교 (클릭하여 열기)"),
         html.Div(style={'display': 'flex', 'gap': '8px', 'alignItems': 'center', 'margin': '8px 0'}, children=[
             html.Span("주차 선택:", style={'fontWeight': '600'}),
-            dcc.Dropdown(id='week-select-fixed', options=week_options,
+            dcc.Dropdown(id='week-select-fixed', options=[{'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}],
                          value='this_week', clearable=False, style={'width': '300px'}),
         ]),
         dcc.Graph(id='weekly-chart-fixed', style={'height': '320px'})
-    ], style={**CARD_STYLE, 'marginBottom': '12px'}),
+    ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}),
 
     html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr', 'gap': '12px', 'marginBottom': '12px'}, children=[
         html.Div([html.H3("월별 발주량 (1~12월, 2022~현재)", style={'marginBottom': '4px', 'fontSize': '1.05rem'}),
-                  dcc.Graph(id='months-1to12-chart', figure=fig_months, style={'height': '320px'})], style=CARD_STYLE),
+                  dcc.Graph(id='months-1to12-chart', figure=go.Figure(), style={'height': '320px'})],
+                 style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}),
     ]),
 
-    html.Div(style={**CARD_STYLE, 'padding': '0px'}, children=[
+    html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '0px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}, children=[
         dcc.Tabs(id="metric-tabs", value="avg", children=[
             dcc.Tab(label="일평균 발주량", value="avg"),
             dcc.Tab(label="월 총 발주량", value="total"),
@@ -821,6 +753,62 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
              'marginTop': '16px', 'fontSize': '.9rem'}, children="© 2025 발주량 분석 대시보드")
 ])
 
+# -----------------------------------------------------------------------------
+# 지연 로딩 보증 함수
+# -----------------------------------------------------------------------------
+
+
+def ensure_data_loaded():
+    if DATA["loaded"]:
+        return
+    try:
+        raw_d, raw_m = load_data_from_gsheet()
+        df_d = cleanse_daily(raw_d)
+        df_m = cleanse_monthly(raw_m)
+        DATA["daily"] = df_d
+        DATA["monthly"] = df_m
+        # 드롭다운 옵션들
+        if not df_d.empty:
+            years = sorted(df_d['연도'].unique())
+            DATA["years_options"] = [
+                {'label': f'{int(y)}년', 'value': int(y)} for y in years]
+            DATA["week_options"] = week_options_from_df(df_d)
+        else:
+            DATA["years_options"] = [
+                {'label': f'{CURRENT_YEAR}년', 'value': CURRENT_YEAR}]
+            DATA["week_options"] = [
+                {'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}]
+        DATA["loaded"] = True
+        print("[INFO] Data loaded successfully.")
+    except Exception as e:
+        # 실패 시에도 앱은 즉시 응답해야 하므로, 빈값으로 마킹
+        print("[ERROR] 데이터 로드 실패:", e)
+        DATA["daily"] = pd.DataFrame()
+        DATA["monthly"] = pd.DataFrame()
+        DATA["years_options"] = [
+            {'label': f'{CURRENT_YEAR}년', 'value': CURRENT_YEAR}]
+        DATA["week_options"] = [
+            {'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}]
+        DATA["loaded"] = True  # 실패 플래그지만 이후 콜백은 빈 데이터로 동작
+
+# -----------------------------------------------------------------------------
+# 콜백 (초기 로드 → 옵션/그림/표 갱신)
+# -----------------------------------------------------------------------------
+
+
+@callback(
+    Output('year-select', 'options'),
+    Output('year-select', 'value'),
+    Input('init', 'n_intervals'),
+    prevent_initial_call=False
+)
+def init_year_options(_):
+    ensure_data_loaded()
+    opts = DATA["years_options"]
+    # 최신 연도 선택(존재하면)
+    latest = max([o['value'] for o in opts]) if opts else CURRENT_YEAR
+    return opts, latest
+
 
 @callback(
     Output('kpi-cards', 'children'),
@@ -829,14 +817,16 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
     Input('year-select', 'value')
 )
 def update_kpis(selected_year):
+    ensure_data_loaded()
+    df_d = DATA["daily"]
+    df_m = DATA["monthly"]
     try:
-        kpi_layout = build_kpi_layout(DF_DAILY, DF_MONTHLY, selected_year)
+        kpi_layout = build_kpi_layout(df_d, df_m, selected_year)
 
-        # 과거 연도 간단 표 (정렬 스타일 적용)
-        if DF_DAILY.empty:
-            prev_tbl = html.Div()
+        if df_d.empty:
+            prev_tbl = html.Div("(데이터 없음)")
         else:
-            years = sorted(DF_DAILY['연도'].unique())
+            years = sorted(df_d['연도'].unique())
 
             td_year_style = {
                 'textAlign': 'left', 'padding': '6px 8px', 'borderBottom': '1px solid #f1f3f5'}
@@ -855,7 +845,7 @@ def update_kpis(selected_year):
             for y in years:
                 if y == selected_year:
                     continue
-                tot, avg, days, _, _ = compute_kpis(DF_DAILY, y)
+                tot, avg, days, _, _ = compute_kpis(df_d, y)
                 rows.append(html.Tr([
                     html.Td(f"{y}년",   style=td_year_style),
                     html.Td(f"{tot:,}", style=td_num_style),
@@ -884,23 +874,22 @@ def update_kpis(selected_year):
 
 
 @callback(
-    Output("metric-tab-content", "children"),
-    Input("metric-tabs", "value"),
-    Input("year-select", "value")
+    Output('week-select-fixed', 'options'),
+    Output('week-select-fixed', 'value'),
+    Input('year-select', 'value')
 )
-def switch_metric_tab(tab_value, selected_year):
-    figs = {
-        "avg": metric_figs['avg_per_day'],
-        "total": metric_figs['monthly_total'],
-        "bw": metric_figs['bw_pages'],
-        "color": metric_figs['color_pages'],
-    }
-    if tab_value == "forecast":
-        layout = forecast_cards_layout(DF_DAILY, DF_MONTHLY, selected_year)
-        return html.Div(style={'padding': '10px'}, children=[layout])
-    fig = figs.get(tab_value, go.Figure())
-    fig.update_layout(height=460)
-    return dcc.Graph(figure=fig, style={'height': '480px'})
+def refresh_week_options(_selected_year):
+    ensure_data_loaded()
+    return DATA["week_options"], 'this_week'
+
+
+@callback(
+    Output('weekly-chart-today', 'figure'),
+    Input('year-select', 'value')
+)
+def refresh_weekly_today(_selected_year):
+    ensure_data_loaded()
+    return figure_weekly_today_based(DATA["daily"])
 
 
 @callback(
@@ -908,9 +897,45 @@ def switch_metric_tab(tab_value, selected_year):
     Input('week-select-fixed', 'value')
 )
 def update_week_fixed(monday_str):
-    return figure_weekly_fixed_mon_fri(DF_DAILY, monday_str)
+    ensure_data_loaded()
+    return figure_weekly_fixed_mon_fri(DATA["daily"], monday_str)
 
 
+@callback(
+    Output('months-1to12-chart', 'figure'),
+    Input('year-select', 'value')
+)
+def refresh_month_chart(_selected_year):
+    ensure_data_loaded()
+    cy = datetime.now(KST).year
+    return figure_months_1to12(DATA["monthly"], start_year=2022, current_year=cy)
+
+
+@callback(
+    Output("metric-tab-content", "children"),
+    Input("metric-tabs", "value"),
+    Input("year-select", "value")
+)
+def switch_metric_tab(tab_value, selected_year):
+    ensure_data_loaded()
+    figs = {
+        "avg": yoy_line_value_bar_rate(DATA["monthly"], '일평균발주량', '월별 일평균 발주량 + YoY%', selected_year),
+        "total": yoy_line_value_bar_rate(DATA["monthly"], '발주량', '월 총 발주량 + YoY%', selected_year),
+        "bw": yoy_line_value_bar_rate(DATA["monthly"], '흑백출력량', '월별 흑백 페이지 + YoY%', selected_year),
+        "color": yoy_line_value_bar_rate(DATA["monthly"], '컬러출력량', '월별 컬러 페이지 + YoY%', selected_year),
+    }
+    if tab_value == "forecast":
+        layout = forecast_cards_layout(
+            DATA["daily"], DATA["monthly"], selected_year)
+        return html.Div(style={'padding': '10px'}, children=[layout])
+    fig = figs.get(tab_value, go.Figure())
+    fig.update_layout(height=460)
+    return dcc.Graph(figure=fig, style={'height': '480px'})
+
+
+# -----------------------------------------------------------------------------
+# 로컬 개발 실행
+# -----------------------------------------------------------------------------
 if __name__ == '__main__':
     host = os.getenv('DASH_HOST', '127.0.0.1')
     port = int(os.getenv('DASH_PORT', '8090'))
