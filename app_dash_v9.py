@@ -320,12 +320,17 @@ def week_options_from_df(df_daily: pd.DataFrame):
     return [{'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}] + opts
 
 
-def figure_weekly_today_based(df_daily: pd.DataFrame) -> go.Figure:
+def figure_weekly_today_based(df_daily: pd.DataFrame, value_col: str = '총발주부수') -> go.Figure:
     now = datetime.now(KST)
     this_week_dates = last_5_business_days_upto_today(now)
     last_week_dates = [d - timedelta(days=7) for d in this_week_dates]
-    m = df_daily.set_index('date_only')[
-        '총발주부수'].to_dict() if not df_daily.empty else {}
+
+    metric_map = {'총발주부수': '발주량', '흑백페이지': '흑백 페이지', '컬러페이지': '컬러 페이지'}
+    unit = '부' if value_col == '총발주부수' else '페이지'
+    metric_name = metric_map.get(value_col, '값')
+
+    m = df_daily.set_index('date_only')[value_col].to_dict(
+    ) if not df_daily.empty and value_col in df_daily.columns else {}
     y_this = [m.get(d, 0) for d in this_week_dates]
     y_last = [m.get(d, 0) for d in last_week_dates]
     x_week = [WEEKDAY_KR[pd.Timestamp(d).weekday()] for d in this_week_dates]
@@ -333,27 +338,28 @@ def figure_weekly_today_based(df_daily: pd.DataFrame) -> go.Figure:
                       for d in this_week_dates]
     last_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
                       for d in last_week_dates]
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=x_week, y=y_last, mode='lines+markers+text', name='지난 주',
         line=dict(width=2, dash='dot'), customdata=last_dates_str,
-        hovertemplate="%{customdata}<br>지난 주: %{y:,}부<extra></extra>",
+        hovertemplate="%{customdata}<br>지난 주: %{y:,}"+unit+"<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_last], textposition='top center', textfont={'size': 11}
     ))
     fig.add_trace(go.Scatter(
         x=x_week, y=y_this, mode='lines+markers+text', name='이번 주',
         line=dict(width=3), customdata=this_dates_str,
-        hovertemplate="%{customdata}<br>이번 주: %{y:,}부<extra></extra>",
+        hovertemplate="%{customdata}<br>이번 주: %{y:,}"+unit+"<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_this], textposition='top center', textfont={'size': 11}
     ))
-    fig.update_layout(title=f'주간 발주량 비교 (기준일: {now.strftime("%Y-%m-%d")})',
-                      xaxis_title='', yaxis_title='발주 부수', template='plotly_white', height=280,
+    fig.update_layout(title=f'주간 {metric_name} 비교 (기준일: {now.strftime("%Y-%m-%d")})',
+                      xaxis_title='', yaxis_title=f'{metric_name} ({unit})', template='plotly_white', height=280,
                       margin=dict(l=20, r=20, t=40, b=20),
                       legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
     return fig
 
 
-def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None) -> go.Figure:
+def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None, value_col: str = '총발주부수') -> go.Figure:
     if monday_str and monday_str != 'this_week':
         try:
             base_mon = datetime.strptime(monday_str, "%Y-%m-%d").date()
@@ -365,8 +371,12 @@ def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None) 
     week_days = [base_mon + timedelta(days=i) for i in range(5)]
     prev_week_days = [d - timedelta(days=7) for d in week_days]
 
-    m = df_daily.set_index('date_only')[
-        '총발주부수'].to_dict() if not df_daily.empty else {}
+    metric_map = {'총발주부수': '발주량', '흑백페이지': '흑백 페이지', '컬러페이지': '컬러 페이지'}
+    unit = '부' if value_col == '총발주부수' else '페이지'
+    metric_name = metric_map.get(value_col, '값')
+
+    m = df_daily.set_index('date_only')[value_col].to_dict(
+    ) if not df_daily.empty and value_col in df_daily.columns else {}
     y_this = [m.get(d, 0) for d in week_days]
     y_last = [m.get(d, 0) for d in prev_week_days]
     x_week = [WEEKDAY_KR[pd.Timestamp(d).weekday()] for d in week_days]
@@ -378,18 +388,18 @@ def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None) 
     fig.add_trace(go.Scatter(
         x=x_week, y=y_last, mode='lines+markers+text', name='지난 주',
         line=dict(width=2, dash='dot'), customdata=last_dates_str,
-        hovertemplate="%{customdata}<br>지난 주: %{y:,}부<extra></extra>",
+        hovertemplate="%{customdata}<br>지난 주: %{y:,}"+unit+"<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_last], textposition='top center', textfont={'size': 11}
     ))
     fig.add_trace(go.Scatter(
         x=x_week, y=y_this, mode='lines+markers+text', name='이번 주',
         line=dict(width=3), customdata=this_dates_str,
-        hovertemplate="%{customdata}<br>이번 주: %{y:,}부<extra></extra>",
+        hovertemplate="%{customdata}<br>이번 주: %{y:,}"+unit+"<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_this], textposition='top center', textfont={'size': 11}
     ))
     title_range = f"{week_days[0].strftime('%Y-%m-%d')} ~ {week_days[-1].strftime('%Y-%m-%d')}"
-    fig.update_layout(title=f'주간 발주량 비교 (월~금 고정): {title_range}',
-                      xaxis_title='', yaxis_title='발주 부수', template='plotly_white', height=300,
+    fig.update_layout(title=f'주간 {metric_name} 비교 (월~금 고정): {title_range}',
+                      xaxis_title='', yaxis_title=f'{metric_name} ({unit})', template='plotly_white', height=300,
                       margin=dict(l=20, r=20, t=40, b=20),
                       legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
     return fig
@@ -813,15 +823,17 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
     ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px',
               'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '16px'}),
 
-    html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr', 'gap': '12px', 'marginBottom': '12px'}, children=[
-        html.Div([
-            html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center'}, children=[
-                html.H3("주간 발주량 비교 (오늘 기준 5영업일 + 지난주 같은 요일)",
-                        style={'marginBottom': '4px', 'fontSize': '1.05rem'}),
-            ]),
-            dcc.Graph(id='weekly-chart-today', figure=go.Figure(),
-                      style={'height': '300px'})
-        ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}),
+    html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '14px',
+                    'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}, children=[
+        html.H3("주간 비교 (오늘 기준 5영업일 vs 지난주 동요일)", style={
+                'marginBottom': '8px', 'fontSize': '1.05rem'}),
+        dcc.Tabs(id="weekly-tabs-today", value="총발주부수", children=[
+            dcc.Tab(label="발주량", value="총발주부수"),
+            dcc.Tab(label="흑백 페이지", value="흑백페이지"),
+            dcc.Tab(label="컬러 페이지", value="컬러페이지"),
+        ]),
+        dcc.Graph(id='weekly-chart-today', figure=go.Figure(),
+                  style={'height': '300px'}),
     ]),
 
     html.Details(open=False, children=[
@@ -830,6 +842,11 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
             html.Span("주차 선택:", style={'fontWeight': '600'}),
             dcc.Dropdown(id='week-select-fixed', options=[{'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}],
                          value='this_week', clearable=False, style={'width': '300px'}),
+        ]),
+        dcc.Tabs(id="weekly-tabs-fixed", value="총발주부수", children=[
+            dcc.Tab(label="발주량", value="총발주부수"),
+            dcc.Tab(label="흑백 페이지", value="흑백페이지"),
+            dcc.Tab(label="컬러 페이지", value="컬러페이지"),
         ]),
         dcc.Graph(id='weekly-chart-fixed', style={'height': '320px'})
     ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px',
@@ -876,7 +893,7 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
             ])
         ]),
         dcc.Textarea(
-            id='memo-text', style={'width': '100%', 'height': '30vh', 'resize': 'vertical'}),
+            id='memo-text', style={'width': '100%', 'height': '30vh', 'resize': 'vertical'}, spellCheck=False),
         html.Div(style={'marginTop': '6px', 'textAlign': 'right',
                  'color': '#888', 'fontSize': '0.8rem'}, id='memo-status')
     ]),
@@ -1031,22 +1048,23 @@ def refresh_week_options(_selected_year, _ver):
 
 @callback(
     Output('weekly-chart-today', 'figure'),
-    Input('year-select', 'value'),
+    Input('weekly-tabs-today', 'value'),
     Input('data-version', 'data')
 )
-def refresh_weekly_today(_selected_year, _ver):
+def refresh_weekly_today(selected_metric, _ver):
     ensure_data_loaded()
-    return figure_weekly_today_based(DATA["daily"])
+    return figure_weekly_today_based(DATA["daily"], value_col=selected_metric)
 
 
 @callback(
     Output('weekly-chart-fixed', 'figure'),
     Input('week-select-fixed', 'value'),
+    Input('weekly-tabs-fixed', 'value'),
     Input('data-version', 'data')
 )
-def update_week_fixed(monday_str, _ver):
+def update_week_fixed(monday_str, selected_metric, _ver):
     ensure_data_loaded()
-    return figure_weekly_fixed_mon_fri(DATA["daily"], monday_str)
+    return figure_weekly_fixed_mon_fri(DATA["daily"], monday_str, value_col=selected_metric)
 
 
 @callback(
