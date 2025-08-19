@@ -8,7 +8,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 import dash
-from dash import dcc, html, Input, Output, State, callback
+from dash import dcc, html, Input, Output, State, callback, clientside_callback
 from dash.exceptions import PreventUpdate
 import plotly.express as px
 import plotly.graph_objects as go
@@ -22,7 +22,6 @@ KST = pytz.timezone('Asia/Seoul')
 # ===== 설정 =====
 AUTO_REFRESH_MIN = int(os.getenv("AUTO_REFRESH_MIN", "15"))
 MOVAVG_MONTHS = int(os.getenv("MOVAVG_MONTHS", "3"))           # 이동평균 개월 수
-# (참고 하한, MA 5지표에는 미사용)
 MA_MIN_PROGRESS = float(os.getenv("MA_MIN_PROGRESS", "0.10"))
 
 # -----------------------------------------------------------------------------
@@ -66,6 +65,41 @@ def open_sheet():
 
 
 # -----------------------------------------------------------------------------
+# 메모장 GSheet 연동 함수
+# -----------------------------------------------------------------------------
+MEMO_SHEET_NAME = "메모장"
+MEMO_CELL = "A1"
+
+
+def read_memo_from_gsheet():
+    try:
+        sh = open_sheet()
+        worksheet = sh.worksheet(MEMO_SHEET_NAME)
+        content = worksheet.acell(MEMO_CELL).value
+        print("[INFO] Memo loaded from GSheet.")
+        return content or ""
+    except gspread.exceptions.WorksheetNotFound:
+        print(
+            f"[WARN] Memo sheet '{MEMO_SHEET_NAME}' not found. Returning empty memo.")
+        return ""
+    except Exception as e:
+        print(f"[ERROR] Failed to read memo from GSheet: {e}")
+        return f"메모를 불러오는 데 실패했습니다: {e}"
+
+
+def write_memo_to_gsheet(content: str):
+    try:
+        sh = open_sheet()
+        worksheet = sh.worksheet(MEMO_SHEET_NAME)
+        worksheet.update_acell(MEMO_CELL, content)
+        print("[INFO] Memo saved to GSheet.")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to write memo to GSheet: {e}")
+        return False
+
+
+# -----------------------------------------------------------------------------
 # 데이터 로드 (지연 로딩 캐시)
 # -----------------------------------------------------------------------------
 DATA = {"loaded": False, "daily": pd.DataFrame(), "monthly": pd.DataFrame(),
@@ -100,7 +134,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=['날짜', 'date_only', '연도', '월',
                                      '총발주종수', '총발주부수', '흑백페이지', '컬러페이지',
-                                     '예상제본시간', '최종출고', '출고부수'])
+                                     '예상제본시간', '최종출고', '출고부수', '비고'])
     d = df.copy()
     d = d.rename(columns={c: norm(c) for c in d.columns})
     col_date = next((c for c in d.columns if c in [
@@ -114,6 +148,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
     col_bind = next((c for c in d.columns if c in ['예상제본시간']), None)
     col_shipt = next((c for c in d.columns if c in ['최종출고']), None)
     col_ships = next((c for c in d.columns if c in ['출고부수']), None)
+    col_remarks = next((c for c in d.columns if '비고' in c), None)  # 비고 열 찾기
 
     d['__year_header__'] = d[col_date].astype(str).str.extract(
         r'(^\s*(\d{4})\s*년\s*$)', expand=True)[1]
@@ -139,7 +174,6 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
     d['날짜'] = pd.to_datetime(d['__full__'], errors='coerce', yearfirst=True)
     d = d.dropna(subset=['날짜']).copy()
 
-    # 공란일 제거(존재하는 주요열 모두 공란일 때만 제거)
     candidates = [col_cnt, col_total, col_bw, col_color]
     existing = [c for c in candidates if c and c in d.columns]
     if existing:
@@ -151,15 +185,14 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
     def to_num(series):
         return pd.to_numeric(series.astype(str).str.replace(',', '', regex=False), errors='coerce').fillna(0).astype(int)
 
-    d['총발주종수'] = to_num(d[col_cnt]) if (
-        col_cnt and col_cnt in d.columns) else 0
-    d['총발주부수'] = to_num(d[col_total]) if (
-        col_total and col_total in d.columns) else 0
-    d['흑백페이지'] = to_num(d[col_bw]) if (col_bw and col_bw in d.columns) else 0
-    d['컬러페이지'] = to_num(d[col_color]) if (
-        col_color and col_color in d.columns) else 0
-    d['출고부수'] = to_num(d[col_ships]) if (
-        col_ships and col_ships in d.columns) else 0
+    d['총발주종수'] = to_num(d[col_cnt]) if col_cnt and col_cnt in d.columns else 0
+    d['총발주부수'] = to_num(
+        d[col_total]) if col_total and col_total in d.columns else 0
+    d['흑백페이지'] = to_num(d[col_bw]) if col_bw and col_bw in d.columns else 0
+    d['컬러페이지'] = to_num(
+        d[col_color]) if col_color and col_color in d.columns else 0
+    d['출고부수'] = to_num(
+        d[col_ships]) if col_ships and col_ships in d.columns else 0
 
     def as_text(colname):
         if colname and colname in d.columns:
@@ -170,6 +203,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
 
     d['예상제본시간'] = as_text(col_bind)
     d['최종출고'] = as_text(col_shipt)
+    d['비고'] = as_text(col_remarks)  # 비고 열 텍스트로 처리
 
     d['date_only'] = d['날짜'].dt.date
     d['연도'] = d['날짜'].dt.year
@@ -177,7 +211,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
 
     return d[['날짜', 'date_only', '연도', '월',
               '총발주종수', '총발주부수', '흑백페이지', '컬러페이지',
-              '예상제본시간', '최종출고', '출고부수']]
+              '예상제본시간', '최종출고', '출고부수', '비고']]  # 비고 열 포함하여 반환
 
 
 def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
@@ -218,13 +252,13 @@ def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
     return d[['월DT', '연도', '월번호', '발주량', '발주일수', '일평균발주량', '흑백출력량', '컬러출력량']]
 
 # -----------------------------------------------------------------------------
-# 영업일/공휴일/월별 가중
+# 영업일/공휴일/월별 가중 (이하 기존 코드와 동일)
 # -----------------------------------------------------------------------------
 
 
 def kr_holidays_for_year(year: int):
     try:
-        import holidays  # type: ignore
+        import holidays
         kr = holidays.KR(years=year)
         return set(kr.keys())
     except Exception as e:
@@ -284,9 +318,6 @@ def seasonal_cum_share_to_date(df_monthly: pd.DataFrame, value_col: str, last_ye
     return float(full_share + part)
 
 
-# -----------------------------------------------------------------------------
-# 주간/월별/YoY 그림
-# -----------------------------------------------------------------------------
 WEEKDAY_KR = ['월', '화', '수', '목', '금', '토', '일']
 
 
@@ -454,10 +485,6 @@ def yoy_line_value_bar_rate(d: pd.DataFrame, value_col: str, title: str, baselin
     fig.update_xaxes(dtick=1)
     return fig
 
-# -----------------------------------------------------------------------------
-# KPI/진행(참고)
-# -----------------------------------------------------------------------------
-
 
 def compute_kpis(df_daily: pd.DataFrame, year: int):
     if df_daily.empty:
@@ -508,7 +535,6 @@ def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, 
     progress_vs_seasonal = (ytd_curr / target_seasonal *
                             100) if target_seasonal else None
 
-    # 참고용 MA (기존 막대그래프 보조치)
     m = today.month
     ma_n = max(1, MOVAVG_MONTHS)
     cur_y = df_monthly[(df_monthly['연도'] == year) & (df_monthly['월번호'] <= m)]
@@ -545,20 +571,13 @@ def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, 
         'share_safe': share_safe
     }
 
-# ===== 이동평균 기반 연간 예측 5종 계산 (견고 버전) =====
-
 
 def _ma_for_col(df_monthly: pd.DataFrame, year: int, col: str, ma_n: int) -> float:
-    """
-    최근 ma_n개월 이동평균(현재 연도에 값이 없거나 0이라도, 직전 연도까지 거슬러서
-    '값이 있는' 월 기준으로 계산). 0 또는 비어있으면 0.0 반환.
-    """
     if df_monthly.empty or col not in df_monthly.columns:
         return 0.0
     sub = df_monthly[df_monthly['연도'] <= year].sort_values('월DT')
     if sub.empty:
         return 0.0
-    # 값이 있는 월만 사용(0은 미기입/미발생으로 간주)
     sub = sub[sub[col].astype(float) > 0]
     if sub.empty:
         return 0.0
@@ -566,11 +585,6 @@ def _ma_for_col(df_monthly: pd.DataFrame, year: int, col: str, ma_n: int) -> flo
 
 
 def compute_ma_forecasts(df_monthly: pd.DataFrame, year: int, ma_n: int) -> dict:
-    """
-    이동평균(MA) 기반 올해 예상치 5종:
-    - 총 발주량/총 발주 일수/흑백/컬러 페이지 합계: 월간 MA × 12
-    - 일 평균 발주량: 월별 '일평균발주량'의 MA(연간화하지 않음)
-    """
     if df_monthly.empty:
         return {k: None for k in ['총 발주량', '일 평균 발주량', '총 발주 일수', '흑백 페이지 합계', '컬러 페이지 합계']}
 
@@ -587,10 +601,6 @@ def compute_ma_forecasts(df_monthly: pd.DataFrame, year: int, ma_n: int) -> dict
         '흑백 페이지 합계': int(round(ma_bw * 12)) if ma_bw > 0 else 0,
         '컬러 페이지 합계': int(round(ma_color * 12)) if ma_color > 0 else 0
     }
-
-# -----------------------------------------------------------------------------
-# KPI/배지/오늘패널
-# -----------------------------------------------------------------------------
 
 
 def badge(text, color="#2b8a3e", tip=None):
@@ -631,26 +641,17 @@ def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int
     ])
 
     prog = compute_progress_advanced(df_daily, df_monthly, year)
-    # ===== 요청 포맷으로 4개 배지 구성 =====
     badges = []
-    # 1) YTD vs 작년 동기간
     if prog['ytd_ly'] > 0:
         ytd_vs_ly = prog['ytd_curr'] / prog['ytd_ly'] * 100
         badges.append(badge(f"YTD vs 작년 동기간: {ytd_vs_ly:.1f}%", "#0b7285"))
-
-    # 2) 경과율(영업일) 대비
     if prog['progress_vs_biz'] is not None:
         badges.append(badge(f"경과율(영업일) 대비: {prog['progress_vs_biz']:.1f}%",
                       "#2b8a3e" if prog['progress_vs_biz'] >= 100 else "#d9480f"))
-
-    # 3) 월별 가중치 대비
     if prog['progress_vs_seasonal'] is not None:
         badges.append(badge(f"월별 가중치 대비: {prog['progress_vs_seasonal']:.1f}%",
                       "#2b8a3e" if prog['progress_vs_seasonal'] >= 100 else "#d9480f"))
-
-    # 4) 영업일 경과율
     badges.append(badge(f"영업일 경과율: {prog['ratio_biz']*100:.1f}%", "#5f3dc4"))
-
     row3 = html.Div(style={'display': 'flex', 'gap': '8px', 'flexWrap': 'wrap',
                     'alignItems': 'center', 'margin': '4px 2px 0'}, children=badges)
     return html.Div(children=[row1, row2, row3])
@@ -674,63 +675,53 @@ def build_today_panel(df_daily: pd.DataFrame):
             def fmt_int(x):
                 try:
                     return f"{int(x):,}"
-                except Exception:
+                except:
                     return "0"
-            total_kinds = fmt_int(r.get('총발주종수', 0))
-            total_qty = fmt_int(r.get('총발주부수', 0))
-            bw_pages = fmt_int(r.get('흑백페이지', 0))
-            color_pages = fmt_int(r.get('컬러페이지', 0))
-            bind_time = (str(r.get('예상제본시간', '-')) or '-')
-            last_ship = (str(r.get('최종출고', '-')) or '-')
-            ship_qty = fmt_int(r.get('출고부수', 0))
-            grid = html.Div(style={
-                'display': 'grid', 'gridTemplateColumns': '1fr 1fr',
-                'rowGap': '6px', 'columnGap': '8px'
-            }, children=[
+
+            grid = html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr 1fr', 'rowGap': '6px', 'columnGap': '8px'}, children=[
                 html.Div("총 발주 종수", style={'color': '#666'}), html.Div(
-                    total_kinds, style={'textAlign': 'right', 'fontWeight': '700'}),
-                html.Div("총 발주 부수", style={'color': '#666'}), html.Div(
-                    total_qty,   style={'textAlign': 'right', 'fontWeight': '700'}),
-                html.Div("흑백 페이지",  style={'color': '#666'}), html.Div(
-                    bw_pages,    style={'textAlign': 'right', 'fontWeight': '700'}),
+                    fmt_int(r.get('총발주종수', 0)), style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("총 발주 부수", style={'color': '#666'}), html.Div(fmt_int(
+                    r.get('총발주부수', 0)),   style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("흑백 페이지",  style={'color': '#666'}), html.Div(fmt_int(
+                    r.get('흑백페이지', 0)),    style={'textAlign': 'right', 'fontWeight': '700'}),
                 html.Div("컬러 페이지",  style={'color': '#666'}), html.Div(
-                    color_pages, style={'textAlign': 'right', 'fontWeight': '700'}),
+                    fmt_int(r.get('컬러페이지', 0)), style={'textAlign': 'right', 'fontWeight': '700'}),
                 html.Div("예상 제본 시간", style={'color': '#666'}), html.Div(
-                    bind_time,  style={'textAlign': 'right', 'fontWeight': '700'}),
+                    (str(r.get('예상제본시간', '-')) or '-'),  style={'textAlign': 'right', 'fontWeight': '700'}),
                 html.Div("최종 출고",    style={'color': '#666'}), html.Div(
-                    last_ship,   style={'textAlign': 'right', 'fontWeight': '700'}),
-                html.Div("출고 부수",    style={'color': '#666'}), html.Div(
-                    ship_qty,    style={'textAlign': 'right', 'fontWeight': '700'}),
+                    (str(r.get('최종출고', '-')) or '-'),   style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("출고 부수",    style={'color': '#666'}), html.Div(fmt_int(
+                    r.get('출고부수', 0)),    style={'textAlign': 'right', 'fontWeight': '700'}),
             ])
-            body = grid
+
+            remarks = (str(r.get('비고', '-')) or '-')
+            if remarks and remarks != '-':
+                remarks_section = html.Div([
+                    html.Hr(style={'margin': '10px 0',
+                            'borderColor': '#e9ecef'}),
+                    html.Div("비고", style={
+                             'color': '#666', 'fontWeight': '700', 'marginBottom': '4px'}),
+                    html.Div(remarks, style={
+                             'whiteSpace': 'pre-wrap', 'fontSize': '0.85rem', 'lineHeight': '1.5', 'wordBreak': 'break-all'})
+                ])
+                body = html.Div([grid, remarks_section])
+            else:
+                body = grid
 
     header = html.Div([
         html.Div("오늘 현황", style={'fontWeight': '800', 'fontSize': '1.05rem'}),
         html.Div(datetime.now(KST).strftime("%Y-%m-%d (%a) %H:%M"),
                  style={'color': '#888', 'fontSize': '0.8rem', 'marginTop': '2px'})
     ])
-
-    return html.Div(style={
-        'position': 'fixed', 'top': '80px', 'right': '16px',
-        'width': 'min(94vw, 310px)', 'zIndex': '999',
-        'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
-        'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '12px 14px',
-        'boxShadow': '0 10px 22px rgba(0,0,0,0.12)'
-    }, children=[header, html.Hr(style={'margin': '8px 0', 'borderColor': '#f1f3f5'}), body])
-
-# (호환용) 만약 옛 코드가 make_today_panel을 호출하면 build_today_panel 사용
+    return html.Div(style={'position': 'fixed', 'top': '80px', 'right': '16px', 'width': 'min(94vw, 310px)', 'zIndex': '999', 'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)', 'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '12px 14px', 'boxShadow': '0 10px 22px rgba(0,0,0,0.12)'}, children=[header, html.Hr(style={'margin': '8px 0', 'borderColor': '#f1f3f5'}), body])
 
 
 def make_today_panel(df_daily: pd.DataFrame):
     return build_today_panel(df_daily)
 
-# -----------------------------------------------------------------------------
-# 예측 섹션 (MA 기반 5개 지표 숫자 요약)
-# -----------------------------------------------------------------------------
-
 
 def forecast_cards_layout(df_daily, df_monthly, year: int):
-    """이동평균(MA) 기반 올해 예상 5개 지표를 숫자로 표시."""
     ma_n = max(1, MOVAVG_MONTHS)
     fx = compute_ma_forecasts(df_monthly, year, ma_n)
 
@@ -738,43 +729,31 @@ def forecast_cards_layout(df_daily, df_monthly, year: int):
         val = f"{v:,}" if isinstance(v, int) else f"{v:,.1f}"
         sub = html.Span(
             hint, style={'color': '#8a8a8a', 'fontSize': '0.8rem'}) if hint else None
-        return html.Div(style={
-            'display': 'grid', 'gridTemplateColumns': '1fr auto', 'alignItems': 'baseline',
-            'padding': '8px 0', 'borderBottom': '1px solid #f1f3f5'
-        }, children=[
+        return html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr auto', 'alignItems': 'baseline', 'padding': '8px 0', 'borderBottom': '1px solid #f1f3f5'}, children=[
             html.Div([html.Strong(k), html.Span(" "), sub]),
             html.Div(val, style={'fontWeight': '800', 'fontSize': '1.1rem'})
         ])
-
     header = html.Div([
-        html.Div(f"{year}년 예상치 (이동평균 {ma_n}개월 기반)",
-                 style={'fontWeight': '800', 'fontSize': '1.05rem', 'marginBottom': '2px'}),
-        html.Div("월별 지표의 최근 N개월 평균을 연간으로 환산합니다. "
-                 "‘일 평균 발주량’은 월별 일평균의 이동평균(연간화하지 않음).",
-                 style={'color': '#888', 'fontSize': '0.85rem'})
+        html.Div(f"{year}년 예상치 (이동평균 {ma_n}개월 기반)", style={
+                 'fontWeight': '800', 'fontSize': '1.05rem', 'marginBottom': '2px'}),
+        html.Div("월별 지표의 최근 N개월 평균을 연간으로 환산합니다. ‘일 평균 발주량’은 월별 일평균의 이동평균(연간화하지 않음).", style={
+                 'color': '#888', 'fontSize': '0.85rem'})
     ], style={'marginBottom': '8px'})
-
-    grid = html.Div(style={
-        'background': 'white', 'borderRadius': '12px', 'padding': '12px',
-        'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'
-    }, children=[
+    grid = html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '12px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}, children=[
         kv_row("총 발주량",       fx['총 발주량'],       "MA×12"),
         kv_row("일 평균 발주량",   fx['일 평균 발주량'],   f"MA({ma_n}개월)"),
         kv_row("총 발주 일수",     fx['총 발주 일수'],     "MA×12"),
         kv_row("흑백 페이지 합계", fx['흑백 페이지 합계'], "MA×12"),
         kv_row("컬러 페이지 합계", fx['컬러 페이지 합계'], "MA×12"),
     ])
-
     return html.Div(children=[header, grid])
 
 
 # -----------------------------------------------------------------------------
 # 앱 (지연 로딩 레이아웃)
 # -----------------------------------------------------------------------------
-external_stylesheets = [{
-    "href": "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css",
-    "rel": "stylesheet"
-}]
+external_stylesheets = [
+    {"href": "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css", "rel": "stylesheet"}]
 app = dash.Dash(__name__,
                 title="발주량 분석 대시보드",
                 meta_tags=[{"name": "viewport",
@@ -783,8 +762,7 @@ app = dash.Dash(__name__,
 server = app.server
 CURRENT_YEAR = datetime.now(KST).year
 
-app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding': '16px',
-                             'fontFamily': 'Noto Sans KR, Malgun Gothic, Arial'}, children=[
+app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding': '16px', 'fontFamily': 'Noto Sans KR, Malgun Gothic, Arial'}, children=[
     dcc.Interval(id='init', interval=250, n_intervals=0, max_intervals=1),
     dcc.Interval(id='today-refresh', interval=120*1000, n_intervals=0),
     dcc.Interval(id='data-auto-refresh',
@@ -793,24 +771,19 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
     dcc.Store(id='data-version', storage_type='memory', data=0),
     dcc.Store(id='today-visible', storage_type='local', data=True),
     dcc.Store(id='memo-visible', storage_type='local', data=False),
-    dcc.Store(id='memo-storage', storage_type='local', data=""),
+    dcc.Store(id='memo-storage', storage_type='memory', data=""),
 
     html.H1("발주량 분석 대시보드", style={
             'textAlign': 'center', 'marginBottom': '6px'}),
     html.P("구글 시트 데이터 기반 · 2021~현재", style={
            'textAlign': 'center', 'marginBottom': '14px', 'color': '#666'}),
 
-    html.Div(style={'display': 'flex', 'gap': '10px', 'justifyContent': 'center', 'alignItems': 'center',
-                    'marginBottom': '8px', 'flexWrap': 'wrap'}, children=[
+    html.Div(style={'display': 'flex', 'gap': '10px', 'justifyContent': 'center', 'alignItems': 'center', 'marginBottom': '8px', 'flexWrap': 'wrap'}, children=[
         html.Span("KPI 연도 선택:", style={'fontWeight': '600'}),
-        dcc.Dropdown(id='year-select',
-                     options=[
-                         {'label': f'{CURRENT_YEAR}년', 'value': CURRENT_YEAR}],
+        dcc.Dropdown(id='year-select', options=[{'label': f'{CURRENT_YEAR}년', 'value': CURRENT_YEAR}],
                      value=CURRENT_YEAR, clearable=False, style={'width': '220px'}),
-        html.Button("데이터 새로고침", id="manual-refresh", n_clicks=0, title="구글 시트에서 다시 불러오기",
-                    style={'borderRadius': '999px', 'padding': '8px 12px', 'fontWeight': '700',
-                           'border': '1px solid #e2e8f0', 'background': '#2563eb',
-                           'color': 'white', 'cursor': 'pointer'}),
+        html.Button("데이터 새로고침", id="manual-refresh", n_clicks=0, title="구글 시트에서 다시 불러오기", style={
+                    'borderRadius': '999px', 'padding': '8px 12px', 'fontWeight': '700', 'border': '1px solid #e2e8f0', 'background': '#2563eb', 'color': 'white', 'cursor': 'pointer'}),
         html.Div(id='kpi-refresh-status',
                  style={'marginLeft': '12px', 'color': '#888'})
     ]),
@@ -820,11 +793,9 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
     html.Details(open=False, children=[
         html.Summary("지난 연도 KPI 펼치기 / 접기"),
         html.Div(id='prev-years-kpi', style={'marginTop': '8px'})
-    ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px',
-              'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '16px'}),
+    ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '16px'}),
 
-    html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '14px',
-                    'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}, children=[
+    html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}, children=[
         html.H3("주간 비교 (오늘 기준 5영업일 vs 지난주 동요일)", style={
                 'marginBottom': '8px', 'fontSize': '1.05rem'}),
         dcc.Tabs(id="weekly-tabs-today", value="총발주부수", children=[
@@ -840,8 +811,8 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
         html.Summary("월~금 고정 주간 비교 (클릭하여 열기)"),
         html.Div(style={'display': 'flex', 'gap': '8px', 'alignItems': 'center', 'margin': '8px 0'}, children=[
             html.Span("주차 선택:", style={'fontWeight': '600'}),
-            dcc.Dropdown(id='week-select-fixed', options=[{'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}],
-                         value='this_week', clearable=False, style={'width': '300px'}),
+            dcc.Dropdown(id='week-select-fixed', options=[
+                         {'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}], value='this_week', clearable=False, style={'width': '300px'}),
         ]),
         dcc.Tabs(id="weekly-tabs-fixed", value="총발주부수", children=[
             dcc.Tab(label="발주량", value="총발주부수"),
@@ -849,18 +820,15 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
             dcc.Tab(label="컬러 페이지", value="컬러페이지"),
         ]),
         dcc.Graph(id='weekly-chart-fixed', style={'height': '320px'})
-    ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px',
-              'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}),
+    ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}),
 
     html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr', 'gap': '12px', 'marginBottom': '12px'}, children=[
         html.Div([html.H3("월별 발주량 (1~12월, 2022~현재)", style={'marginBottom': '4px', 'fontSize': '1.05rem'}),
                   dcc.Graph(id='months-1to12-chart', figure=go.Figure(), style={'height': '320px'})],
-                 style={'background': 'white', 'borderRadius': '12px', 'padding': '14px',
-                        'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}),
+                 style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}),
     ]),
 
-    html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '0px',
-                    'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}, children=[
+    html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '0px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}, children=[
         dcc.Tabs(id="metric-tabs", value="avg", children=[
             dcc.Tab(label="일평균 발주량", value="avg"),
             dcc.Tab(label="월 총 발주량", value="total"),
@@ -873,47 +841,38 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
 
     html.Div(id='today-floating-panel'),
 
-    # 메모장 팝업
-    html.Div(id='memo-popup', style={
-        'position': 'fixed', 'left': '16px', 'top': '80px',
-        'width': 'min(92vw, 360px)', 'zIndex': '1000',
-        'display': 'none',
-        'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
-        'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '10px 12px',
-        'boxShadow': '0 10px 22px rgba(0,0,0,0.12)', 'maxHeight': '70vh', 'overflowY': 'auto'
-    }, children=[
+    html.Div(id='memo-popup', style={'position': 'fixed', 'left': '16px', 'top': '80px', 'width': 'min(92vw, 360px)', 'zIndex': '1000', 'display': 'none', 'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)', 'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '10px 12px', 'boxShadow': '0 10px 22px rgba(0,0,0,0.12)', 'maxHeight': '70vh', 'overflowY': 'auto'}, children=[
         html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center', 'marginBottom': '6px'}, children=[
-            html.Div("메모장", style={'fontWeight': '800', 'fontSize': '1.0rem'}),
-            html.Div([
-                html.Button("저장", id="memo-save-btn", n_clicks=0,
-                            style={'marginRight': '6px'}),
-                html.Button("지우기", id="memo-clear-btn", n_clicks=0,
-                            style={'marginRight': '6px'}),
-                html.Button("닫기", id="memo-close-btn", n_clicks=0),
-            ])
+            html.Div("메모장 (구글 시트 연동)", style={
+                     'fontWeight': '800', 'fontSize': '1.0rem'}),
+            html.Button("닫기", id="memo-close-btn", n_clicks=0)
         ]),
-        dcc.Textarea(
-            id='memo-text', style={'width': '100%', 'height': '30vh', 'resize': 'vertical'}, spellCheck=False),
+        html.Div(style={'display': 'flex', 'gap': '6px', 'marginBottom': '8px', 'flexWrap': 'wrap'}, children=[
+            html.Button("타임스탬프", id="memo-timestamp-btn", n_clicks=0),
+            html.Button("저장", id="memo-save-btn", n_clicks=0,
+                        style={'background': '#2563eb', 'color': 'white', 'border': 'none'}),
+            html.Button("지우기", id="memo-clear-btn", n_clicks=0),
+            html.Div([
+                dcc.Clipboard(id="memo-clipboard",
+                              style={"display": "inline"}),
+                html.Button("클립보드 복사", id="memo-copy-btn", n_clicks=0),
+            ]),
+        ]),
+        dcc.Textarea(id='memo-text', style={'width': '100%',
+                     'height': '30vh', 'resize': 'vertical'}, spellCheck=False),
         html.Div(style={'marginTop': '6px', 'textAlign': 'right',
                  'color': '#888', 'fontSize': '0.8rem'}, id='memo-status')
     ]),
 
-    html.Button("오늘 현황", id="fab-today-toggle", n_clicks=0, title="오른쪽 패널 열기/닫기", style={
-        'position': 'fixed', 'right': '16px', 'bottom': '16px',
-        'borderRadius': '999px', 'padding': '12px 16px', 'fontWeight': '800',
-        'background': '#2563eb', 'color': 'white', 'border': 'none',
-        'boxShadow': '0 8px 18px rgba(0,0,0,0.18)', 'zIndex': 1100, 'cursor': 'pointer'
-    }),
-    html.Button("메모장", id="fab-memo-toggle", n_clicks=0, title="메모장 열기/닫기", style={
-        'position': 'fixed', 'left': '16px', 'bottom': '16px',
-        'borderRadius': '999px', 'padding': '12px 16px', 'fontWeight': '800',
-        'background': '#059669', 'color': 'white', 'border': 'none',
-        'boxShadow': '0 8px 18px rgba(0,0,0,0.18)', 'zIndex': 1100, 'cursor': 'pointer'
-    }),
+    html.Button("오늘 현황", id="fab-today-toggle", n_clicks=0, title="오른쪽 패널 열기/닫기", style={'position': 'fixed', 'right': '16px', 'bottom': '16px', 'borderRadius': '999px', 'padding': '12px 16px',
+                'fontWeight': '800', 'background': '#2563eb', 'color': 'white', 'border': 'none', 'boxShadow': '0 8px 18px rgba(0,0,0,0.18)', 'zIndex': 1100, 'cursor': 'pointer'}),
+    html.Button("메모장", id="fab-memo-toggle", n_clicks=0, title="메모장 열기/닫기", style={'position': 'fixed', 'left': '16px', 'bottom': '16px', 'borderRadius': '999px', 'padding': '12px 16px',
+                'fontWeight': '800', 'background': '#059669', 'color': 'white', 'border': 'none', 'boxShadow': '0 8px 18px rgba(0,0,0,0.18)', 'zIndex': 1100, 'cursor': 'pointer'}),
 ])
 
 # -----------------------------------------------------------------------------
-# 데이터 로딩/리프레시
+# 데이터 로딩/리프레시 (이하 콜백은 기존 코드와 거의 동일)
+# ... (기존 콜백 코드 생략) ...
 # -----------------------------------------------------------------------------
 
 
@@ -940,23 +899,19 @@ def ensure_data_loaded():
         print("[INFO] Data loaded successfully.")
     except Exception as e:
         print("[ERROR] 데이터 로드 실패:", e)
-        DATA["daily"] = pd.DataFrame()
-        DATA["monthly"] = pd.DataFrame()
+        DATA["daily"], DATA["monthly"] = pd.DataFrame(), pd.DataFrame()
         DATA["years_options"] = [
             {'label': f'{CURRENT_YEAR}년', 'value': CURRENT_YEAR}]
         DATA["week_options"] = [
             {'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}]
-        DATA["loaded"] = True  # 실패해도 앱은 동작
+        DATA["loaded"] = True
 
 
-@callback(
-    Output('data-version', 'data'),
-    Input('data-auto-refresh', 'n_intervals'),
-    Input('manual-refresh', 'n_clicks'),
-    State('data-version', 'data'),
-    prevent_initial_call=False
-)
+@callback(Output('data-version', 'data'), Input('data-auto-refresh', 'n_intervals'), Input('manual-refresh', 'n_clicks'), State('data-version', 'data'), prevent_initial_call=False)
 def auto_or_manual_reload(_n, _clicks, ver):
+    ctx = dash.callback_context
+    if not ctx.triggered and ver is not None:
+        raise PreventUpdate
     try:
         DATA["loaded"] = False
         ensure_data_loaded()
@@ -969,13 +924,7 @@ def auto_or_manual_reload(_n, _clicks, ver):
 # -----------------------------------------------------------------------------
 
 
-@callback(
-    Output('year-select', 'options'),
-    Output('year-select', 'value'),
-    Input('init', 'n_intervals'),
-    Input('data-version', 'data'),
-    prevent_initial_call=False
-)
+@callback(Output('year-select', 'options'), Output('year-select', 'value'), Input('init', 'n_intervals'), Input('data-version', 'data'), prevent_initial_call=False)
 def init_year_options(_, _ver):
     ensure_data_loaded()
     opts = DATA["years_options"]
@@ -983,160 +932,136 @@ def init_year_options(_, _ver):
     return opts, latest
 
 
-@callback(
-    Output('kpi-cards', 'children'),
-    Output('prev-years-kpi', 'children'),
-    Output('kpi-refresh-status', 'children'),
-    Input('year-select', 'value'),
-    Input('data-version', 'data')
-)
+@callback(Output('kpi-cards', 'children'), Output('prev-years-kpi', 'children'), Output('kpi-refresh-status', 'children'), Input('year-select', 'value'), Input('data-version', 'data'))
 def update_kpis(selected_year, _ver):
     ensure_data_loaded()
-    df_d = DATA["daily"]
-    df_m = DATA["monthly"]
+    df_d, df_m = DATA["daily"], DATA["monthly"]
     try:
         kpi_layout = build_kpi_layout(df_d, df_m, selected_year)
         if df_d.empty:
             prev_tbl = html.Div("(데이터 없음)")
         else:
             years = sorted(df_d['연도'].unique())
-            td_year_style = {
-                'textAlign': 'left', 'padding': '6px 8px', 'borderBottom': '1px solid #f1f3f5'}
-            td_num_style = {'textAlign': 'right', 'padding': '6px 8px', 'borderBottom': '1px solid #f1f3f5',
-                            'fontVariantNumeric': 'tabular-nums', 'whiteSpace': 'nowrap'}
-            th_year_style = {'textAlign': 'left', 'padding': '6px 8px',
-                             'borderBottom': '2px solid #dee2e6', 'color': '#495057'}
-            th_num_style = {'textAlign': 'right', 'padding': '6px 8px', 'borderBottom': '2px solid #dee2e6', 'color': '#495057',
-                            'fontVariantNumeric': 'tabular-nums', 'whiteSpace': 'nowrap'}
-            rows = []
-            for y in years:
-                if y == selected_year:
-                    continue
-                tot, avg, days, _, _ = compute_kpis(df_d, y)
-                rows.append(html.Tr([
-                    html.Td(f"{y}년",   style=td_year_style),
-                    html.Td(f"{tot:,}", style=td_num_style),
-                    html.Td(f"{avg:,}", style=td_num_style),
-                    html.Td(f"{days:,}", style=td_num_style),
-                ]))
-            header = html.Tr([
-                html.Th("연도",            style=th_year_style),
-                html.Th("총 발주량",       style=th_num_style),
-                html.Th("일 평균 발주량",  style=th_num_style),
-                html.Th("총 발주 일수",    style=th_num_style),
-            ])
-            prev_tbl = html.Table([header] + rows,
-                                  style={
-                                      'width': '100%', 'borderCollapse': 'collapse', 'tableLayout': 'fixed'},
-                                  className="kpi-table")
+            td_style = {'textAlign': 'right', 'padding': '6px 8px', 'borderBottom': '1px solid #f1f3f5',
+                        'fontVariantNumeric': 'tabular-nums', 'whiteSpace': 'nowrap'}
+            th_style = {'textAlign': 'right', 'padding': '6px 8px',
+                        'borderBottom': '2px solid #dee2e6', 'color': '#495057'}
+            rows = [html.Tr([html.Td(f"{y}년", style={**td_style, 'textAlign': 'left'})] + [html.Td(
+                f"{val:,}", style=td_style) for val in compute_kpis(df_d, y)[:3]]) for y in years if y != selected_year]
+            header = html.Tr([html.Th(h, style={**th_style, 'textAlign': 'left' if i == 0 else 'right'})
+                             for i, h in enumerate(["연도", "총 발주량", "일 평균 발주량", "총 발주 일수"])])
+            prev_tbl = html.Table([header] + rows, style={
+                                  'width': '100%', 'borderCollapse': 'collapse', 'tableLayout': 'fixed'}, className="kpi-table")
         stamp = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
         return kpi_layout, prev_tbl, f"업데이트: {stamp}"
     except Exception as e:
         return html.Div("KPI 계산 오류"), html.Div(f"오류: {e}"), ""
 
 
-@callback(
-    Output('week-select-fixed', 'options'),
-    Output('week-select-fixed', 'value'),
-    Input('year-select', 'value'),
-    Input('data-version', 'data')
-)
-def refresh_week_options(_selected_year, _ver):
+@callback(Output('week-select-fixed', 'options'), Output('week-select-fixed', 'value'), Input('data-version', 'data'))
+def refresh_week_options(_ver):
     ensure_data_loaded()
     return DATA["week_options"], 'this_week'
 
 
-@callback(
-    Output('weekly-chart-today', 'figure'),
-    Input('weekly-tabs-today', 'value'),
-    Input('data-version', 'data')
-)
+@callback(Output('weekly-chart-today', 'figure'), Input('weekly-tabs-today', 'value'), Input('data-version', 'data'))
 def refresh_weekly_today(selected_metric, _ver):
     ensure_data_loaded()
     return figure_weekly_today_based(DATA["daily"], value_col=selected_metric)
 
 
-@callback(
-    Output('weekly-chart-fixed', 'figure'),
-    Input('week-select-fixed', 'value'),
-    Input('weekly-tabs-fixed', 'value'),
-    Input('data-version', 'data')
-)
+@callback(Output('weekly-chart-fixed', 'figure'), Input('week-select-fixed', 'value'), Input('weekly-tabs-fixed', 'value'), Input('data-version', 'data'))
 def update_week_fixed(monday_str, selected_metric, _ver):
     ensure_data_loaded()
     return figure_weekly_fixed_mon_fri(DATA["daily"], monday_str, value_col=selected_metric)
 
 
-@callback(
-    Output('months-1to12-chart', 'figure'),
-    Input('year-select', 'value'),
-    Input('data-version', 'data')
-)
-def refresh_month_chart(_selected_year, _ver):
+@callback(Output('months-1to12-chart', 'figure'), Input('data-version', 'data'))
+def refresh_month_chart(_ver):
     ensure_data_loaded()
     cy = datetime.now(KST).year
     return figure_months_1to12(DATA["monthly"], start_year=2022, current_year=cy)
 
 
-@callback(
-    Output("metric-tab-content", "children"),
-    Input("metric-tabs", "value"),
-    Input("year-select", "value"),
-    Input("data-version", "data")
-)
+@callback(Output("metric-tab-content", "children"), Input("metric-tabs", "value"), Input("year-select", "value"), Input("data-version", "data"))
 def switch_metric_tab(tab_value, selected_year, _ver):
     ensure_data_loaded()
-    figs = {
-        "avg":   yoy_line_value_bar_rate(DATA["monthly"], '일평균발주량', '월별 일평균 발주량 + YoY%', selected_year),
-        "total": yoy_line_value_bar_rate(DATA["monthly"], '발주량',       '월 총 발주량 + YoY%',       selected_year),
-        "bw":    yoy_line_value_bar_rate(DATA["monthly"], '흑백출력량',   '월별 흑백 페이지 + YoY%',    selected_year),
-        "color": yoy_line_value_bar_rate(DATA["monthly"], '컬러출력량',   '월별 컬러 페이지 + YoY%',    selected_year),
-    }
     if tab_value == "forecast":
-        layout = forecast_cards_layout(
-            DATA["daily"], DATA["monthly"], selected_year)
-        return html.Div(style={'padding': '10px'}, children=[layout])
-    fig = figs.get(tab_value, go.Figure())
+        return html.Div(style={'padding': '10px'}, children=[forecast_cards_layout(DATA["daily"], DATA["monthly"], selected_year)])
+
+    col_map = {"avg": "일평균발주량", "total": "발주량",
+               "bw": "흑백출력량", "color": "컬러출력량"}
+    title_map = {"avg": "월별 일평균 발주량", "total": "월 총 발주량",
+                 "bw": "월별 흑백 페이지", "color": "월별 컬러 페이지"}
+    fig = yoy_line_value_bar_rate(
+        DATA["monthly"], col_map[tab_value], f'{title_map[tab_value]} + YoY%', selected_year)
     fig.update_layout(height=460)
     return dcc.Graph(figure=fig, style={'height': '480px'})
 
-# 오늘 패널 갱신
 
-
-@callback(
-    Output('today-floating-panel', 'children'),
-    Input('today-refresh', 'n_intervals'),
-    Input('data-version', 'data'),
-    prevent_initial_call=False
-)
+@callback(Output('today-floating-panel', 'children'), Input('today-refresh', 'n_intervals'), Input('data-version', 'data'), prevent_initial_call=False)
 def refresh_today_panel(_n, _ver):
     ensure_data_loaded()
     return build_today_panel(DATA["daily"])
 
-# 오늘 패널 표시/숨김
 
-
-@callback(
-    Output('today-floating-panel', 'style'),
-    Input('today-visible', 'data'),
-    prevent_initial_call=False
-)
+@callback(Output('today-floating-panel', 'style'), Input('today-visible', 'data'), prevent_initial_call=False)
 def apply_today_visibility(visible):
-    if bool(visible) or visible is None:
-        return {}
-    return {'display': 'none'}
+    return {} if bool(visible) or visible is None else {'display': 'none'}
 
 
-@callback(
-    Output('today-visible', 'data'),
-    Input('fab-today-toggle', 'n_clicks'),
-    State('today-visible', 'data'),
-    prevent_initial_call=True
-)
+@callback(Output('today-visible', 'data'), Input('fab-today-toggle', 'n_clicks'), State('today-visible', 'data'), prevent_initial_call=True)
 def toggle_today_visible(_n, visible):
     return not bool(visible)
 
-# 메모 팝업 제어
+# -----------------------------------------------------------------------------
+# 메모장 콜백
+# -----------------------------------------------------------------------------
+
+
+clientside_callback(
+    """
+    function(n_clicks, existing_text) {
+        if (n_clicks === null || n_clicks === undefined) {
+            return dash_clientside.no_update;
+        }
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        const hours = String(now.getHours()).padStart(2, '0');
+        const minutes = String(now.getMinutes()).padStart(2, '0');
+        const timestamp = `${year}-${month}-${day} ${hours}:${minutes}`;
+        
+        if (existing_text) {
+            return existing_text + '\\n' + timestamp + ': ';
+        }
+        return timestamp + ': ';
+    }
+    """,
+    Output('memo-text', 'value', allow_duplicate=True),
+    Input('memo-timestamp-btn', 'n_clicks'),
+    State('memo-text', 'value'),
+    prevent_initial_call=True
+)
+
+
+@callback(
+    Output('memo-clipboard', 'content'),
+    Input('memo-copy-btn', 'n_clicks'),
+    State('memo-text', 'value'),
+    prevent_initial_call=True
+)
+def copy_memo_to_clipboard(n_clicks, text):
+    return text
+
+
+@callback(
+    Output('memo-storage', 'data'),
+    Input('init', 'n_intervals')
+)
+def load_memo_on_start(_):
+    return read_memo_from_gsheet()
 
 
 @callback(
@@ -1150,8 +1075,7 @@ def toggle_memo_visible(fab_clicks, close_clicks, visible):
     ctx = dash.callback_context
     if not ctx.triggered:
         return visible
-    trig = ctx.triggered[0]['prop_id'].split('.')[0]
-    if trig == 'memo-close-btn':
+    if ctx.triggered_id == 'memo-close-btn':
         return False
     return not bool(visible)
 
@@ -1160,37 +1084,43 @@ def toggle_memo_visible(fab_clicks, close_clicks, visible):
     Output('memo-popup', 'style'),
     Output('memo-text', 'value'),
     Output('memo-status', 'children'),
-    Output('memo-storage', 'data'),
+    Output('memo-storage', 'data', allow_duplicate=True),
     Input('memo-visible', 'data'),
     Input('memo-save-btn', 'n_clicks'),
     Input('memo-clear-btn', 'n_clicks'),
     State('memo-text', 'value'),
     State('memo-storage', 'data'),
-    prevent_initial_call=False
+    prevent_initial_call=True
 )
-def memo_controller(visible, save_n, clear_n, text, stored):
-    base_style = {
-        'position': 'fixed', 'left': '16px', 'top': '80px',
-        'width': 'min(92vw, 360px)', 'zIndex': '1000',
-        'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
-        'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '10px 12px',
-        'boxShadow': '0 10px 22px rgba(0,0,0,0.12)', 'maxHeight': '70vh', 'overflowY': 'auto'
-    }
+def memo_controller(visible, save_n, clear_n, text, stored_memo):
+    base_style = {'position': 'fixed', 'left': '16px', 'top': '80px', 'width': 'min(92vw, 360px)', 'zIndex': '1000', 'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
+                  'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '10px 12px', 'boxShadow': '0 10px 22px rgba(0,0,0,0.12)', 'maxHeight': '70vh', 'overflowY': 'auto'}
+
+    display_style = {'display': 'block' if visible else 'none'}
     ctx = dash.callback_context
-    if not ctx.triggered:
-        display = 'block' if bool(visible) else 'none'
-        return ({**base_style, 'display': display}, stored or "", "", stored or "")
-    trig = ctx.triggered[0]['prop_id'].split('.')[0]
-    if trig == 'memo-visible':
-        display = 'block' if bool(visible) else 'none'
-        return ({**base_style, 'display': display}, stored if visible else (text or ""), "", stored if visible else (text or ""))
-    if trig == 'memo-save-btn':
-        content = text or ""
-        return ({**base_style, 'display': 'block'}, content, "저장 완료", content)
-    if trig == 'memo-clear-btn':
-        return ({**base_style, 'display': 'block'}, "", "모든 내용을 지웠습니다.", "")
-    display = 'block' if bool(visible) else 'none'
-    return ({**base_style, 'display': display}, stored or "", "", stored or "")
+    triggered_id = ctx.triggered_id
+
+    if triggered_id == 'memo-save-btn':
+        success = write_memo_to_gsheet(text)
+        if success:
+            return {**base_style, **display_style}, text, "저장 완료", text
+        else:
+            return {**base_style, **display_style}, text, "오류: 저장 실패", stored_memo
+
+    if triggered_id == 'memo-clear-btn':
+        success = write_memo_to_gsheet("")
+        if success:
+            return {**base_style, **display_style}, "", "삭제 완료", ""
+        else:
+            return {**base_style, **display_style}, text, "오류: 삭제 실패", stored_memo
+
+    if triggered_id == 'memo-visible':
+        if visible:
+            return {**base_style, **display_style}, stored_memo, "", dash.no_update
+        else:
+            return {**base_style, **display_style}, dash.no_update, "", dash.no_update
+
+    raise PreventUpdate
 
 
 # -----------------------------------------------------------------------------
