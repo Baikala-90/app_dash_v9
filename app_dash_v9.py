@@ -148,7 +148,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
     col_bind = next((c for c in d.columns if c in ['예상제본시간']), None)
     col_shipt = next((c for c in d.columns if c in ['최종출고']), None)
     col_ships = next((c for c in d.columns if c in ['출고부수']), None)
-    col_remarks = next((c for c in d.columns if '비고' in c), None)  # 비고 열 찾기
+    col_remarks = next((c for c in d.columns if '비고' in c), None)
 
     d['__year_header__'] = d[col_date].astype(str).str.extract(
         r'(^\s*(\d{4})\s*년\s*$)', expand=True)[1]
@@ -203,7 +203,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
 
     d['예상제본시간'] = as_text(col_bind)
     d['최종출고'] = as_text(col_shipt)
-    d['비고'] = as_text(col_remarks)  # 비고 열 텍스트로 처리
+    d['비고'] = as_text(col_remarks)
 
     d['date_only'] = d['날짜'].dt.date
     d['연도'] = d['날짜'].dt.year
@@ -211,10 +211,11 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
 
     return d[['날짜', 'date_only', '연도', '월',
               '총발주종수', '총발주부수', '흑백페이지', '컬러페이지',
-              '예상제본시간', '최종출고', '출고부수', '비고']]  # 비고 열 포함하여 반환
+              '예상제본시간', '최종출고', '출고부수', '비고']]
 
 
 def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
+    # 원본 파일의 안정적인 로직으로 복원
     if df.empty:
         return pd.DataFrame(columns=['월DT', '발주량', '발주일수', '일평균발주량', '흑백출력량', '컬러출력량', '연도', '월번호'])
     d = df.copy()
@@ -252,7 +253,7 @@ def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
     return d[['월DT', '연도', '월번호', '발주량', '발주일수', '일평균발주량', '흑백출력량', '컬러출력량']]
 
 # -----------------------------------------------------------------------------
-# 영업일/공휴일/월별 가중 (이하 기존 코드와 동일)
+# 이후 코드는 기능 추가 및 오류 수정 사항이 모두 포함된 최신 버전입니다.
 # -----------------------------------------------------------------------------
 
 
@@ -441,8 +442,8 @@ def figure_months_1to12(df_monthly: pd.DataFrame, start_year=2022, current_year=
         current_year = datetime.now(KST).year
     d = df_monthly[(df_monthly['연도'] >= start_year) & (
         df_monthly['연도'] <= current_year)].copy()
-    if d.empty:
-        return go.Figure()
+    if d.empty or '발주량' not in d.columns or d['발주량'].sum() == 0:
+        return go.Figure(layout={'title': '월별 발주량 데이터가 없습니다.', 'xaxis': {'visible': False}, 'yaxis': {'visible': False}})
     pivot = d.pivot_table(index='월번호', columns='연도',
                           values='발주량', aggfunc='sum').sort_index()
     pivot = pivot[[c for c in pivot.columns if c <= current_year]]
@@ -456,13 +457,11 @@ def figure_months_1to12(df_monthly: pd.DataFrame, start_year=2022, current_year=
 
 
 def yoy_line_value_bar_rate(d: pd.DataFrame, value_col: str, title: str, baseline_year: int) -> go.Figure:
-    if d.empty:
+    if d.empty or value_col not in d.columns:
         return go.Figure()
     d = d.copy()
     d = d[d['연도'] <= baseline_year]
     d = d.sort_values(['연도', '월번호'])
-    if value_col not in d.columns:
-        d[value_col] = 0
     d['prev_year'] = d.groupby('월번호')[value_col].shift(1)
     d['YoY%'] = ((d[value_col] - d['prev_year']) /
                  d['prev_year'].replace({0: pd.NA})) * 100
@@ -717,22 +716,26 @@ def build_today_panel(df_daily: pd.DataFrame):
     return html.Div(style={'position': 'fixed', 'top': '80px', 'right': '16px', 'width': 'min(94vw, 310px)', 'zIndex': '999', 'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)', 'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '12px 14px', 'boxShadow': '0 10px 22px rgba(0,0,0,0.12)'}, children=[header, html.Hr(style={'margin': '8px 0', 'borderColor': '#f1f3f5'}), body])
 
 
-def make_today_panel(df_daily: pd.DataFrame):
-    return build_today_panel(df_daily)
-
-
 def forecast_cards_layout(df_daily, df_monthly, year: int):
     ma_n = max(1, MOVAVG_MONTHS)
     fx = compute_ma_forecasts(df_monthly, year, ma_n)
 
     def kv_row(k, v, hint=""):
-        val = f"{v:,}" if isinstance(v, int) else f"{v:,.1f}"
+        # 오류 수정을 위해 None 값 처리 추가
+        if v is None:
+            val = "-"
+        elif isinstance(v, int):
+            val = f"{v:,}"
+        else:
+            val = f"{v:,.1f}"
+
         sub = html.Span(
             hint, style={'color': '#8a8a8a', 'fontSize': '0.8rem'}) if hint else None
         return html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr auto', 'alignItems': 'baseline', 'padding': '8px 0', 'borderBottom': '1px solid #f1f3f5'}, children=[
             html.Div([html.Strong(k), html.Span(" "), sub]),
             html.Div(val, style={'fontWeight': '800', 'fontSize': '1.1rem'})
         ])
+
     header = html.Div([
         html.Div(f"{year}년 예상치 (이동평균 {ma_n}개월 기반)", style={
                  'fontWeight': '800', 'fontSize': '1.05rem', 'marginBottom': '2px'}),
@@ -758,7 +761,8 @@ app = dash.Dash(__name__,
                 title="발주량 분석 대시보드",
                 meta_tags=[{"name": "viewport",
                             "content": "width=device-width, initial-scale=1"}],
-                external_stylesheets=external_stylesheets)
+                external_stylesheets=external_stylesheets,
+                suppress_callback_exceptions=True)  # allow_duplicate=True를 위해 추가
 server = app.server
 CURRENT_YEAR = datetime.now(KST).year
 
@@ -871,8 +875,7 @@ app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding'
 ])
 
 # -----------------------------------------------------------------------------
-# 데이터 로딩/리프레시 (이하 콜백은 기존 코드와 거의 동일)
-# ... (기존 콜백 코드 생략) ...
+# 데이터 로딩/리프레시
 # -----------------------------------------------------------------------------
 
 
@@ -976,8 +979,8 @@ def update_week_fixed(monday_str, selected_metric, _ver):
     return figure_weekly_fixed_mon_fri(DATA["daily"], monday_str, value_col=selected_metric)
 
 
-@callback(Output('months-1to12-chart', 'figure'), Input('data-version', 'data'))
-def refresh_month_chart(_ver):
+@callback(Output('months-1to12-chart', 'figure'), Input('year-select', 'value'), Input('data-version', 'data'))
+def refresh_month_chart(_selected_year, _ver):
     ensure_data_loaded()
     cy = datetime.now(KST).year
     return figure_months_1to12(DATA["monthly"], start_year=2022, current_year=cy)
@@ -1022,7 +1025,7 @@ def toggle_today_visible(_n, visible):
 clientside_callback(
     """
     function(n_clicks, existing_text) {
-        if (n_clicks === null || n_clicks === undefined) {
+        if (n_clicks === null || n_clicks === undefined || n_clicks === 0) {
             return dash_clientside.no_update;
         }
         const now = new Date();
@@ -1053,7 +1056,7 @@ clientside_callback(
     prevent_initial_call=True
 )
 def copy_memo_to_clipboard(n_clicks, text):
-    return text
+    return text or ""
 
 
 @callback(
@@ -1101,7 +1104,7 @@ def memo_controller(visible, save_n, clear_n, text, stored_memo):
     triggered_id = ctx.triggered_id
 
     if triggered_id == 'memo-save-btn':
-        success = write_memo_to_gsheet(text)
+        success = write_memo_to_gsheet(text or "")
         if success:
             return {**base_style, **display_style}, text, "저장 완료", text
         else:
