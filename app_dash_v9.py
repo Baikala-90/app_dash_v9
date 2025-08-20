@@ -21,7 +21,7 @@ KST = pytz.timezone('Asia/Seoul')
 
 # ===== 설정 =====
 AUTO_REFRESH_MIN = int(os.getenv("AUTO_REFRESH_MIN", "15"))
-MOVAVG_MONTHS = int(os.getenv("MOVAVG_MONTHS", "3"))           # 이동평균 개월 수
+MOVAVG_MONTHS = int(os.getenv("MOVAVG_MONTHS", "3"))
 MA_MIN_PROGRESS = float(os.getenv("MA_MIN_PROGRESS", "0.10"))
 
 # -----------------------------------------------------------------------------
@@ -253,7 +253,7 @@ def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
     return d[['월DT', '연도', '월번호', '발주량', '발주일수', '일평균발주량', '흑백출력량', '컬러출력량']]
 
 # -----------------------------------------------------------------------------
-# 이후 코드는 기능 추가 및 오류 수정 사항이 모두 포함된 최신 버전입니다.
+# 영업일/공휴일/월별 가중
 # -----------------------------------------------------------------------------
 
 
@@ -319,6 +319,9 @@ def seasonal_cum_share_to_date(df_monthly: pd.DataFrame, value_col: str, last_ye
     return float(full_share + part)
 
 
+# -----------------------------------------------------------------------------
+# 주간/월별/YoY 그림
+# -----------------------------------------------------------------------------
 WEEKDAY_KR = ['월', '화', '수', '목', '금', '토', '일']
 
 
@@ -484,6 +487,10 @@ def yoy_line_value_bar_rate(d: pd.DataFrame, value_col: str, title: str, baselin
     fig.update_xaxes(dtick=1)
     return fig
 
+# -----------------------------------------------------------------------------
+# KPI/진행(참고)
+# -----------------------------------------------------------------------------
+
 
 def compute_kpis(df_daily: pd.DataFrame, year: int):
     if df_daily.empty:
@@ -570,36 +577,9 @@ def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, 
         'share_safe': share_safe
     }
 
-
-def _ma_for_col(df_monthly: pd.DataFrame, year: int, col: str, ma_n: int) -> float:
-    if df_monthly.empty or col not in df_monthly.columns:
-        return 0.0
-    sub = df_monthly[df_monthly['연도'] <= year].sort_values('월DT')
-    if sub.empty:
-        return 0.0
-    sub = sub[sub[col].astype(float) > 0]
-    if sub.empty:
-        return 0.0
-    return float(sub[col].astype(float).tail(ma_n).mean())
-
-
-def compute_ma_forecasts(df_monthly: pd.DataFrame, year: int, ma_n: int) -> dict:
-    if df_monthly.empty:
-        return {k: None for k in ['총 발주량', '일 평균 발주량', '총 발주 일수', '흑백 페이지 합계', '컬러 페이지 합계']}
-
-    ma_total = _ma_for_col(df_monthly, year, '발주량',       ma_n)
-    ma_days = _ma_for_col(df_monthly, year, '발주일수',     ma_n)
-    ma_bw = _ma_for_col(df_monthly, year, '흑백출력량',   ma_n)
-    ma_color = _ma_for_col(df_monthly, year, '컬러출력량',   ma_n)
-    ma_dailyavg = _ma_for_col(df_monthly, year, '일평균발주량', ma_n)
-
-    return {
-        '총 발주량':       int(round(ma_total * 12)) if ma_total > 0 else 0,
-        '일 평균 발주량':   round(ma_dailyavg, 1) if ma_dailyavg > 0 else 0.0,
-        '총 발주 일수':     int(round(ma_days * 12)) if ma_days > 0 else 0,
-        '흑백 페이지 합계': int(round(ma_bw * 12)) if ma_bw > 0 else 0,
-        '컬러 페이지 합계': int(round(ma_color * 12)) if ma_color > 0 else 0
-    }
+# -----------------------------------------------------------------------------
+# KPI/배지/오늘패널
+# -----------------------------------------------------------------------------
 
 
 def badge(text, color="#2b8a3e", tip=None):
@@ -640,17 +620,43 @@ def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int
     ])
 
     prog = compute_progress_advanced(df_daily, df_monthly, year)
+    today = datetime.now(KST).date()
+    monthly_progress_ratio = business_day_ratio_for_month(today)
+
     badges = []
+
+    # 1) YTD vs 작년 동기간
     if prog['ytd_ly'] > 0:
         ytd_vs_ly = prog['ytd_curr'] / prog['ytd_ly'] * 100
-        badges.append(badge(f"YTD vs 작년 동기간: {ytd_vs_ly:.1f}%", "#0b7285"))
+        diff = ytd_vs_ly - 100
+        tip = f"작년 동기간 대비 {abs(diff):.1f}% 발주량이 {'늘었어요' if diff >= 0 else '줄었어요'}!"
+        badges.append(
+            badge(f"YTD vs 작년 동기간: {ytd_vs_ly:.1f}%", "#0b7285", tip=tip))
+
+    # 2) 경과율(영업일) 대비
     if prog['progress_vs_biz'] is not None:
+        diff = prog['progress_vs_biz'] - 100
+        tip = f"단순 영업일 경과율 기준 목표보다 {abs(diff):.1f}% {'빠르게' if diff >= 0 else '느리게'} 진행중이에요!"
         badges.append(badge(f"경과율(영업일) 대비: {prog['progress_vs_biz']:.1f}%",
-                      "#2b8a3e" if prog['progress_vs_biz'] >= 100 else "#d9480f"))
+                      "#2b8a3e" if prog['progress_vs_biz'] >= 100 else "#d9480f", tip=tip))
+
+    # 3) 월별 가중치 대비
     if prog['progress_vs_seasonal'] is not None:
+        diff = prog['progress_vs_seasonal'] - 100
+        tip = f"과거 월별 패턴(계절성) 기준 목표보다 {abs(diff):.1f}% {'앞서가고' if diff >= 0 else '뒤쳐지고'} 있어요!"
         badges.append(badge(f"월별 가중치 대비: {prog['progress_vs_seasonal']:.1f}%",
-                      "#2b8a3e" if prog['progress_vs_seasonal'] >= 100 else "#d9480f"))
-    badges.append(badge(f"영업일 경과율: {prog['ratio_biz']*100:.1f}%", "#5f3dc4"))
+                      "#2b8a3e" if prog['progress_vs_seasonal'] >= 100 else "#d9480f", tip=tip))
+
+    # 4) 연간 영업일 경과율
+    tip_annual = f"올해 전체 영업일({prog['total_biz_days']}일) 중 {prog['elapsed_biz_days']}일이 지나 {prog['ratio_biz']*100:.1f}%가 경과했어요."
+    badges.append(
+        badge(f"연간 영업일 경과율: {prog['ratio_biz']*100:.1f}%", "#5f3dc4", tip=tip_annual))
+
+    # 5) 월간 영업일 경과율
+    tip_monthly = f"이번 달 전체 영업일 중 {monthly_progress_ratio*100:.1f}%가 경과했어요."
+    badges.append(badge(
+        f"월간 영업일 경과율: {monthly_progress_ratio*100:.1f}%", "#e67700", tip=tip_monthly))
+
     row3 = html.Div(style={'display': 'flex', 'gap': '8px', 'flexWrap': 'wrap',
                     'alignItems': 'center', 'margin': '4px 2px 0'}, children=badges)
     return html.Div(children=[row1, row2, row3])
@@ -715,13 +721,66 @@ def build_today_panel(df_daily: pd.DataFrame):
     ])
     return html.Div(style={'position': 'fixed', 'top': '80px', 'right': '16px', 'width': 'min(94vw, 310px)', 'zIndex': '999', 'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)', 'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '12px 14px', 'boxShadow': '0 10px 22px rgba(0,0,0,0.12)'}, children=[header, html.Hr(style={'margin': '8px 0', 'borderColor': '#f1f3f5'}), body])
 
+# -----------------------------------------------------------------------------
+# 예측 섹션
+# -----------------------------------------------------------------------------
+
+
+def compute_advanced_forecasts(df_daily: pd.DataFrame, year: int):
+    """실시간 실적과 계절성을 모두 고려한 연간 예상치 계산"""
+    today = datetime.now(KST).date()
+    last_year = year - 1
+    metrics = ['총발주부수', '흑백페이지', '컬러페이지']
+    forecasts = {}
+
+    # 1. 일 평균 발주량 예측: 올해 현재까지의 일 평균 실적을 연간 예측치로 사용
+    ytd_daily_df = df_daily[(df_daily['연도'] == year) &
+                            (df_daily['date_only'] <= today)]
+    if not ytd_daily_df.empty:
+        elapsed_days = ytd_daily_df['date_only'].nunique()
+        ytd_total_orders = ytd_daily_df['총발주부수'].sum()
+        forecasts['일 평균 발주량'] = round(
+            ytd_total_orders / elapsed_days, 1) if elapsed_days > 0 else 0.0
+    else:
+        forecasts['일 평균 발주량'] = 0.0
+
+    # 2. 나머지 지표 예측 (총발주부수, 흑백/컬러 페이지)
+    for metric in metrics:
+        # 올해 현재까지 누적 실적 (YTD)
+        current_ytd = df_daily[(df_daily['연도'] == year) & (
+            df_daily['date_only'] <= today)][metric].sum()
+
+        # 작년 동기간 누적 실적
+        same_date_ly = safe_same_date_last_year(today)
+        last_year_ytd = df_daily[(df_daily['연도'] == last_year) & (
+            df_daily['date_only'] <= same_date_ly)][metric].sum()
+
+        # 작년 남은 기간의 실적
+        last_year_remaining = df_daily[(df_daily['연도'] == last_year) & (
+            df_daily['date_only'] > same_date_ly)][metric].sum()
+
+        # 성장률 계산
+        growth_rate = current_ytd / last_year_ytd if last_year_ytd > 0 else 1.0
+
+        # 남은 기간 예상 실적 = 작년 남은 기간 실적 * 성장률
+        forecast_remaining = last_year_remaining * growth_rate
+
+        # 최종 연간 예상치 = 올해 현재까지 실적 + 남은 기간 예상 실적
+        total_forecast = current_ytd + forecast_remaining
+        forecasts[metric] = int(round(total_forecast))
+
+    # 키 이름 맞추기
+    forecasts['총 발주량'] = forecasts.pop('총발주부수')
+    forecasts['흑백 페이지 합계'] = forecasts.pop('흑백페이지')
+    forecasts['컬러 페이지 합계'] = forecasts.pop('컬러페이지')
+
+    return forecasts
+
 
 def forecast_cards_layout(df_daily, df_monthly, year: int):
-    ma_n = max(1, MOVAVG_MONTHS)
-    fx = compute_ma_forecasts(df_monthly, year, ma_n)
+    fx = compute_advanced_forecasts(df_daily, year)
 
     def kv_row(k, v, hint=""):
-        # 오류 수정을 위해 None 값 처리 추가
         if v is None:
             val = "-"
         elif isinstance(v, int):
@@ -737,17 +796,17 @@ def forecast_cards_layout(df_daily, df_monthly, year: int):
         ])
 
     header = html.Div([
-        html.Div(f"{year}년 예상치 (이동평균 {ma_n}개월 기반)", style={
+        html.Div(f"{year}년 예상치 (실시간 실적 및 계절성 반영)", style={
                  'fontWeight': '800', 'fontSize': '1.05rem', 'marginBottom': '2px'}),
-        html.Div("월별 지표의 최근 N개월 평균을 연간으로 환산합니다. ‘일 평균 발주량’은 월별 일평균의 이동평균(연간화하지 않음).", style={
-                 'color': '#888', 'fontSize': '0.85rem'})
+        html.Div("YTD 실적 + (YoY 성장률 × 작년 잔여 실적)으로 연말까지의 성과를 예측합니다.",
+                 style={'color': '#888', 'fontSize': '0.85rem'})
     ], style={'marginBottom': '8px'})
+
     grid = html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '12px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}, children=[
-        kv_row("총 발주량",       fx['총 발주량'],       "MA×12"),
-        kv_row("일 평균 발주량",   fx['일 평균 발주량'],   f"MA({ma_n}개월)"),
-        kv_row("총 발주 일수",     fx['총 발주 일수'],     "MA×12"),
-        kv_row("흑백 페이지 합계", fx['흑백 페이지 합계'], "MA×12"),
-        kv_row("컬러 페이지 합계", fx['컬러 페이지 합계'], "MA×12"),
+        kv_row("총 발주량",       fx.get('총 발주량'),       "누적+예측"),
+        kv_row("일 평균 발주량",   fx.get('일 평균 발주량'),   "YTD 실적 기준"),
+        kv_row("흑백 페이지 합계", fx.get('흑백 페이지 합계'), "누적+예측"),
+        kv_row("컬러 페이지 합계", fx.get('컬러 페이지 합계'), "누적+예측"),
     ])
     return html.Div(children=[header, grid])
 
@@ -762,7 +821,7 @@ app = dash.Dash(__name__,
                 meta_tags=[{"name": "viewport",
                             "content": "width=device-width, initial-scale=1"}],
                 external_stylesheets=external_stylesheets,
-                suppress_callback_exceptions=True)  # allow_duplicate=True를 위해 추가
+                suppress_callback_exceptions=True)
 server = app.server
 CURRENT_YEAR = datetime.now(KST).year
 
