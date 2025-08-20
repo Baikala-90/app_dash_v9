@@ -215,7 +215,6 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
-    # 원본 파일의 안정적인 로직으로 복원
     if df.empty:
         return pd.DataFrame(columns=['월DT', '발주량', '발주일수', '일평균발주량', '흑백출력량', '컬러출력량', '연도', '월번호'])
     d = df.copy()
@@ -279,7 +278,7 @@ def business_days_in_range(start_d: date, end_d: date, holiday_set: set):
     return cnt
 
 
-def business_day_ratio_for_month(today: date) -> float:
+def get_monthly_business_day_info(today: date):
     year, month = today.year, today.month
     start = date(year, month, 1)
     last_day = calendar.monthrange(year, month)[1]
@@ -287,7 +286,12 @@ def business_day_ratio_for_month(today: date) -> float:
     hol = kr_holidays_for_year(year)
     elapsed = business_days_in_range(start, today, hol)
     total = business_days_in_range(start, end_month, hol)
-    return (elapsed / total) if total else 0.0
+    ratio = (elapsed / total) if total > 0 else 0.0
+    return {'elapsed': elapsed, 'total': total, 'ratio': ratio}
+
+
+def business_day_ratio_for_month(today: date) -> float:
+    return get_monthly_business_day_info(today)['ratio']
 
 
 def total_business_days_in_year(year: int) -> int:
@@ -517,47 +521,39 @@ def safe_same_date_last_year(today: date) -> date:
 
 
 def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int):
+    current_year = datetime.now(KST).year
     today = datetime.now(KST).date()
+
+    if year < current_year:
+        as_of_date = date(year, 12, 31)
+    else:
+        as_of_date = today
+
     ly = year - 1
 
     ytd_curr = df_daily[(df_daily['연도'] == year) & (
-        df_daily['date_only'] <= today)]['총발주부수'].sum()
-    same_date_ly = safe_same_date_last_year(today)
+        df_daily['date_only'] <= as_of_date)]['총발주부수'].sum()
+
+    same_date_ly = safe_same_date_last_year(as_of_date)
     ytd_ly = df_daily[(df_daily['연도'] == ly) & (
         df_daily['date_only'] <= same_date_ly)]['총발주부수'].sum()
     last_year_total = df_daily[df_daily['연도'] == ly]['총발주부수'].sum()
 
     hol = kr_holidays_for_year(year)
-    elapsed_biz_days = business_days_in_range(date(year, 1, 1), today, hol)
+    elapsed_biz_days = business_days_in_range(
+        date(year, 1, 1), as_of_date, hol)
     total_biz_days = business_days_in_range(
         date(year, 1, 1), date(year, 12, 31), hol)
     ratio_biz = (elapsed_biz_days / total_biz_days) if total_biz_days else 0.0
 
     target_biz = last_year_total * ratio_biz if last_year_total else 0
-    progress_vs_biz = (ytd_curr / target_biz * 100) if target_biz else None
+    progress_vs_biz = (ytd_curr / target_biz * 100) if target_biz > 0 else None
 
-    seasonal_share = seasonal_cum_share_to_date(df_monthly, '발주량', ly, today)
-    target_seasonal = last_year_total * seasonal_share if last_year_total else 0
+    seasonal_share = seasonal_cum_share_to_date(
+        df_monthly, '발주량', ly, as_of_date)
+    target_seasonal = last_year_total * seasonal_share if last_year_total > 0 else 0
     progress_vs_seasonal = (ytd_curr / target_seasonal *
-                            100) if target_seasonal else None
-
-    m = today.month
-    ma_n = max(1, MOVAVG_MONTHS)
-    cur_y = df_monthly[(df_monthly['연도'] == year) & (df_monthly['월번호'] <= m)]
-    cur_months = cur_y[['월번호', '발주량']].sort_values('월번호')
-    vals = cur_months['발주량'].tolist()
-    need = ma_n - len(vals)
-    if need > 0:
-        prev = df_monthly[(df_monthly['연도'] == ly)].sort_values('월번호')
-        take = prev['발주량'].tolist()[-need:] if not prev.empty else []
-        vals = take + vals
-    if len(vals) == 0:
-        ma_recent = 0.0
-    else:
-        ma_recent = float(pd.Series(vals[-ma_n:]).mean())
-    share_safe = max(seasonal_share or 0.0, MA_MIN_PROGRESS)
-    forecast_ma = int(round(ma_recent * 12 / share_safe)
-                      ) if ma_recent > 0 else None
+                            100) if target_seasonal > 0 else None
 
     return {
         'ytd_curr': int(ytd_curr),
@@ -566,15 +562,11 @@ def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, 
         'ratio_biz': ratio_biz,
         'progress_vs_biz': progress_vs_biz,
         'seasonal_share_to_date': seasonal_share,
+        'target_seasonal': int(target_seasonal),
+        'target_biz': int(target_biz),
         'progress_vs_seasonal': progress_vs_seasonal,
         'elapsed_biz_days': elapsed_biz_days,
-        'total_biz_days': total_biz_days,
-        'today': today,
-        'same_date_ly': same_date_ly,
-        'ma_recent': ma_recent,
-        'forecast_ma': forecast_ma,
-        'ma_n': ma_n,
-        'share_safe': share_safe
+        'total_biz_days': total_biz_days
     }
 
 # -----------------------------------------------------------------------------
@@ -621,41 +613,47 @@ def build_kpi_layout(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, year: int
 
     prog = compute_progress_advanced(df_daily, df_monthly, year)
     today = datetime.now(KST).date()
-    monthly_progress_ratio = business_day_ratio_for_month(today)
+    monthly_info = get_monthly_business_day_info(today)
 
     badges = []
 
-    # 1) YTD vs 작년 동기간
     if prog['ytd_ly'] > 0:
         ytd_vs_ly = prog['ytd_curr'] / prog['ytd_ly'] * 100
         diff = ytd_vs_ly - 100
-        tip = f"작년 동기간 대비 {abs(diff):.1f}% 발주량이 {'늘었어요' if diff >= 0 else '줄었어요'}!"
+        interpretation = f"작년 동기간 대비 {abs(diff):.1f}% 발주량이 {'늘었어요' if diff >= 0 else '줄었어요'}!"
+        calculation = f"산출 근거: (올해 YTD {prog['ytd_curr']:,} ÷ 작년 YTD {prog['ytd_ly']:,}) × 100"
+        tip = f"{interpretation}\n{'-'*20}\n{calculation}"
         badges.append(
             badge(f"YTD vs 작년 동기간: {ytd_vs_ly:.1f}%", "#0b7285", tip=tip))
 
-    # 2) 경과율(영업일) 대비
     if prog['progress_vs_biz'] is not None:
         diff = prog['progress_vs_biz'] - 100
-        tip = f"단순 영업일 경과율 기준 목표보다 {abs(diff):.1f}% {'빠르게' if diff >= 0 else '느리게'} 진행중이에요!"
+        interpretation = f"단순 영업일 경과율 기준 목표보다 {abs(diff):.1f}% {'빠르게' if diff >= 0 else '느리게'} 진행중이에요!"
+        calculation = (f"산출 근거: {prog['ytd_curr']:,} (올해 YTD) ÷ \n"
+                       f"({prog['last_year_total']:,} (작년 총량) × {prog['ratio_biz']:.1%} (진행율) = {prog['target_biz']:,})")
+        tip = f"{interpretation}\n{'-'*20}\n{calculation}"
         badges.append(badge(f"경과율(영업일) 대비: {prog['progress_vs_biz']:.1f}%",
                       "#2b8a3e" if prog['progress_vs_biz'] >= 100 else "#d9480f", tip=tip))
 
-    # 3) 월별 가중치 대비
     if prog['progress_vs_seasonal'] is not None:
         diff = prog['progress_vs_seasonal'] - 100
-        tip = f"과거 월별 패턴(계절성) 기준 목표보다 {abs(diff):.1f}% {'앞서가고' if diff >= 0 else '뒤쳐지고'} 있어요!"
+        interpretation = f"과거 월별 패턴(계절성) 기준 목표보다 {abs(diff):.1f}% {'앞서가고' if diff >= 0 else '뒤쳐지고'} 있어요!"
+        calculation = f"산출 근거: {prog['ytd_curr']:,} (올해 YTD) ÷ {prog['target_seasonal']:,} (작년 패턴 기준 목표)"
+        tip = f"{interpretation}\n{'-'*20}\n{calculation}"
         badges.append(badge(f"월별 가중치 대비: {prog['progress_vs_seasonal']:.1f}%",
                       "#2b8a3e" if prog['progress_vs_seasonal'] >= 100 else "#d9480f", tip=tip))
 
-    # 4) 연간 영업일 경과율
-    tip_annual = f"올해 전체 영업일({prog['total_biz_days']}일) 중 {prog['elapsed_biz_days']}일이 지나 {prog['ratio_biz']*100:.1f}%가 경과했어요."
+    interpretation_annual = f"{year}년 전체 영업일({prog['total_biz_days']}일) 중 {prog['elapsed_biz_days']}일이 지났어요."
+    calculation_annual = f"산출 근거: {prog['elapsed_biz_days']}일 ÷ {prog['total_biz_days']}일"
+    tip_annual = f"{interpretation_annual}\n{'-'*20}\n{calculation_annual}"
     badges.append(
         badge(f"연간 영업일 경과율: {prog['ratio_biz']*100:.1f}%", "#5f3dc4", tip=tip_annual))
 
-    # 5) 월간 영업일 경과율
-    tip_monthly = f"이번 달 전체 영업일 중 {monthly_progress_ratio*100:.1f}%가 경과했어요."
+    interpretation_monthly = f"이번 달(현재 {today.month}월) 전체 영업일({monthly_info['total']}일) 중 {monthly_info['elapsed']}일이 지났어요."
+    calculation_monthly = f"산출 근거: {monthly_info['elapsed']}일 ÷ {monthly_info['total']}일"
+    tip_monthly = f"{interpretation_monthly}\n{'-'*20}\n{calculation_monthly}"
     badges.append(badge(
-        f"월간 영업일 경과율: {monthly_progress_ratio*100:.1f}%", "#e67700", tip=tip_monthly))
+        f"월간 영업일 경과율: {monthly_info['ratio']*100:.1f}%", "#e67700", tip=tip_monthly))
 
     row3 = html.Div(style={'display': 'flex', 'gap': '8px', 'flexWrap': 'wrap',
                     'alignItems': 'center', 'margin': '4px 2px 0'}, children=badges)
@@ -727,13 +725,11 @@ def build_today_panel(df_daily: pd.DataFrame):
 
 
 def compute_advanced_forecasts(df_daily: pd.DataFrame, year: int):
-    """실시간 실적과 계절성을 모두 고려한 연간 예상치 계산"""
     today = datetime.now(KST).date()
     last_year = year - 1
     metrics = ['총발주부수', '흑백페이지', '컬러페이지']
     forecasts = {}
 
-    # 1. 일 평균 발주량 예측: 올해 현재까지의 일 평균 실적을 연간 예측치로 사용
     ytd_daily_df = df_daily[(df_daily['연도'] == year) &
                             (df_daily['date_only'] <= today)]
     if not ytd_daily_df.empty:
@@ -744,32 +740,24 @@ def compute_advanced_forecasts(df_daily: pd.DataFrame, year: int):
     else:
         forecasts['일 평균 발주량'] = 0.0
 
-    # 2. 나머지 지표 예측 (총발주부수, 흑백/컬러 페이지)
     for metric in metrics:
-        # 올해 현재까지 누적 실적 (YTD)
         current_ytd = df_daily[(df_daily['연도'] == year) & (
             df_daily['date_only'] <= today)][metric].sum()
 
-        # 작년 동기간 누적 실적
         same_date_ly = safe_same_date_last_year(today)
         last_year_ytd = df_daily[(df_daily['연도'] == last_year) & (
             df_daily['date_only'] <= same_date_ly)][metric].sum()
 
-        # 작년 남은 기간의 실적
         last_year_remaining = df_daily[(df_daily['연도'] == last_year) & (
             df_daily['date_only'] > same_date_ly)][metric].sum()
 
-        # 성장률 계산
         growth_rate = current_ytd / last_year_ytd if last_year_ytd > 0 else 1.0
 
-        # 남은 기간 예상 실적 = 작년 남은 기간 실적 * 성장률
         forecast_remaining = last_year_remaining * growth_rate
 
-        # 최종 연간 예상치 = 올해 현재까지 실적 + 남은 기간 예상 실적
         total_forecast = current_ytd + forecast_remaining
         forecasts[metric] = int(round(total_forecast))
 
-    # 키 이름 맞추기
     forecasts['총 발주량'] = forecasts.pop('총발주부수')
     forecasts['흑백 페이지 합계'] = forecasts.pop('흑백페이지')
     forecasts['컬러 페이지 합계'] = forecasts.pop('컬러페이지')
