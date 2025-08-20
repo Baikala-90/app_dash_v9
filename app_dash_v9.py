@@ -469,9 +469,18 @@ def yoy_line_value_bar_rate(d: pd.DataFrame, value_col: str, title: str, baselin
     d = d.copy()
     d = d[d['연도'] <= baseline_year]
     d = d.sort_values(['연도', '월번호'])
+
+    # YoY% 계산 로직 수정
     d['prev_year'] = d.groupby('월번호')[value_col].shift(1)
-    d['YoY%'] = ((d[value_col] - d['prev_year']) /
-                 d['prev_year'].replace({0: pd.NA})) * 100
+
+    # 기본 YoY 계산
+    yoy = (d[value_col] - d['prev_year']) / d['prev_year'] * 100
+
+    # 사용자 정의 규칙 적용: -100% 또는 inf/nan인 경우 0으로 처리
+    yoy = yoy.mask(d['prev_year'] == 0, 0)
+    yoy = yoy.mask((d[value_col] == 0) & (d['prev_year'] > 0), 0)
+
+    d['YoY%'] = yoy.fillna(0)
 
     fig = go.Figure()
     for y, sub in d.groupby('연도'):
