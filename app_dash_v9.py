@@ -16,6 +16,9 @@ import plotly.graph_objects as go
 from dotenv import load_dotenv
 import pytz
 
+# 새로 추가된 페이지 import
+import billing_page
+
 load_dotenv()
 KST = pytz.timezone('Asia/Seoul')
 
@@ -470,13 +473,10 @@ def yoy_line_value_bar_rate(d: pd.DataFrame, value_col: str, title: str, baselin
     d = d[d['연도'] <= baseline_year]
     d = d.sort_values(['연도', '월번호'])
 
-    # YoY% 계산 로직 수정
     d['prev_year'] = d.groupby('월번호')[value_col].shift(1)
 
-    # 기본 YoY 계산
     yoy = (d[value_col] - d['prev_year']) / d['prev_year'] * 100
 
-    # 사용자 정의 규칙 적용: -100% 또는 inf/nan인 경우 0으로 처리
     yoy = yoy.mask(d['prev_year'] == 0, 0)
     yoy = yoy.mask((d[value_col] == 0) & (d['prev_year'] > 0), 0)
 
@@ -822,113 +822,138 @@ app = dash.Dash(__name__,
 server = app.server
 CURRENT_YEAR = datetime.now(KST).year
 
-app.layout = html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding': '16px', 'fontFamily': 'Noto Sans KR, Malgun Gothic, Arial'}, children=[
-    dcc.Interval(id='init', interval=250, n_intervals=0, max_intervals=1),
-    dcc.Interval(id='today-refresh', interval=120*1000, n_intervals=0),
-    dcc.Interval(id='data-auto-refresh',
-                 interval=AUTO_REFRESH_MIN*60*1000, n_intervals=0),
+# -----------------------------------------------------------------------------
+# 메인 대시보드 레이아웃 함수
+# -----------------------------------------------------------------------------
 
-    dcc.Store(id='data-version', storage_type='memory', data=0),
-    dcc.Store(id='today-visible', storage_type='local', data=True),
-    dcc.Store(id='memo-visible', storage_type='local', data=False),
-    dcc.Store(id='memo-storage', storage_type='memory', data=""),
 
-    html.H1("발주량 분석 대시보드", style={
-            'textAlign': 'center', 'marginBottom': '6px'}),
-    html.P("구글 시트 데이터 기반 · 2021~현재", style={
-           'textAlign': 'center', 'marginBottom': '14px', 'color': '#666'}),
+def create_main_dashboard_layout():
+    return html.Div(style={'maxWidth': '1100px', 'margin': '0 auto', 'padding': '16px', 'fontFamily': 'Noto Sans KR, Malgun Gothic, Arial'}, children=[
+        dcc.Interval(id='init', interval=250, n_intervals=0, max_intervals=1),
+        dcc.Interval(id='today-refresh', interval=120*1000, n_intervals=0),
+        dcc.Interval(id='data-auto-refresh',
+                     interval=AUTO_REFRESH_MIN*60*1000, n_intervals=0),
 
-    html.Div(style={'display': 'flex', 'gap': '10px', 'justifyContent': 'center', 'alignItems': 'center', 'marginBottom': '8px', 'flexWrap': 'wrap'}, children=[
-        html.Span("KPI 연도 선택:", style={'fontWeight': '600'}),
-        dcc.Dropdown(id='year-select', options=[{'label': f'{CURRENT_YEAR}년', 'value': CURRENT_YEAR}],
-                     value=CURRENT_YEAR, clearable=False, style={'width': '220px'}),
-        html.Button("데이터 새로고침", id="manual-refresh", n_clicks=0, title="구글 시트에서 다시 불러오기", style={
-                    'borderRadius': '999px', 'padding': '8px 12px', 'fontWeight': '700', 'border': '1px solid #e2e8f0', 'background': '#2563eb', 'color': 'white', 'cursor': 'pointer'}),
-        html.Div(id='kpi-refresh-status',
-                 style={'marginLeft': '12px', 'color': '#888'})
-    ]),
+        dcc.Store(id='data-version', storage_type='memory', data=0),
+        dcc.Store(id='today-visible', storage_type='local', data=True),
+        dcc.Store(id='memo-visible', storage_type='local', data=False),
 
-    html.Div(id='kpi-cards'),
+        html.H1("발주량 분석 대시보드", style={
+                'textAlign': 'center', 'marginBottom': '6px'}),
+        html.P("구글 시트 데이터 기반 · 2021~현재", style={
+               'textAlign': 'center', 'marginBottom': '14px', 'color': '#666'}),
 
-    html.Details(open=False, children=[
-        html.Summary("지난 연도 KPI 펼치기 / 접기"),
-        html.Div(id='prev-years-kpi', style={'marginTop': '8px'})
-    ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '16px'}),
-
-    html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}, children=[
-        html.H3("주간 비교 (오늘 기준 5영업일 vs 지난주 동요일)", style={
-                'marginBottom': '8px', 'fontSize': '1.05rem'}),
-        dcc.Tabs(id="weekly-tabs-today", value="총발주부수", children=[
-            dcc.Tab(label="발주량", value="총발주부수"),
-            dcc.Tab(label="흑백 페이지", value="흑백페이지"),
-            dcc.Tab(label="컬러 페이지", value="컬러페이지"),
+        html.Div(style={'display': 'flex', 'gap': '10px', 'justifyContent': 'center', 'alignItems': 'center', 'marginBottom': '8px', 'flexWrap': 'wrap'}, children=[
+            html.Span("KPI 연도 선택:", style={'fontWeight': '600'}),
+            dcc.Dropdown(id='year-select', options=[{'label': f'{CURRENT_YEAR}년', 'value': CURRENT_YEAR}],
+                         value=CURRENT_YEAR, clearable=False, style={'width': '220px'}),
+            html.Button("데이터 새로고침", id="manual-refresh", n_clicks=0, title="구글 시트에서 다시 불러오기", style={
+                        'borderRadius': '999px', 'padding': '8px 12px', 'fontWeight': '700', 'border': '1px solid #e2e8f0', 'background': '#2563eb', 'color': 'white', 'cursor': 'pointer'}),
+            dcc.Link(html.Button('청구액 페이지'), href='/billing',
+                     style={'textDecoration': 'none'}),
+            html.Div(id='kpi-refresh-status',
+                     style={'marginLeft': '12px', 'color': '#888'})
         ]),
-        dcc.Graph(id='weekly-chart-today', figure=go.Figure(),
-                  style={'height': '300px'}),
-    ]),
 
-    html.Details(open=False, children=[
-        html.Summary("월~금 고정 주간 비교 (클릭하여 열기)"),
-        html.Div(style={'display': 'flex', 'gap': '8px', 'alignItems': 'center', 'margin': '8px 0'}, children=[
-            html.Span("주차 선택:", style={'fontWeight': '600'}),
-            dcc.Dropdown(id='week-select-fixed', options=[
-                         {'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}], value='this_week', clearable=False, style={'width': '300px'}),
-        ]),
-        dcc.Tabs(id="weekly-tabs-fixed", value="총발주부수", children=[
-            dcc.Tab(label="발주량", value="총발주부수"),
-            dcc.Tab(label="흑백 페이지", value="흑백페이지"),
-            dcc.Tab(label="컬러 페이지", value="컬러페이지"),
-        ]),
-        dcc.Graph(id='weekly-chart-fixed', style={'height': '320px'})
-    ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}),
+        html.Div(id='kpi-cards'),
 
-    html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr', 'gap': '12px', 'marginBottom': '12px'}, children=[
-        html.Div([html.H3("월별 발주량 (1~12월, 2022~현재)", style={'marginBottom': '4px', 'fontSize': '1.05rem'}),
-                  dcc.Graph(id='months-1to12-chart', figure=go.Figure(), style={'height': '320px'})],
-                 style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}),
-    ]),
+        html.Details(open=False, children=[
+            html.Summary("지난 연도 KPI 펼치기 / 접기"),
+            html.Div(id='prev-years-kpi', style={'marginTop': '8px'})
+        ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '16px'}),
 
-    html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '0px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}, children=[
-        dcc.Tabs(id="metric-tabs", value="avg", children=[
-            dcc.Tab(label="일평균 발주량", value="avg"),
-            dcc.Tab(label="월 총 발주량", value="total"),
-            dcc.Tab(label="흑백 페이지", value="bw"),
-            dcc.Tab(label="컬러 페이지", value="color"),
-            dcc.Tab(label="연간 예측", value="forecast"),
-        ]),
-        html.Div(id="metric-tab-content", style={'padding': '8px 4px'})
-    ]),
-
-    html.Div(id='today-floating-panel'),
-
-    html.Div(id='memo-popup', style={'position': 'fixed', 'left': '16px', 'top': '80px', 'width': 'min(92vw, 360px)', 'zIndex': '1000', 'display': 'none', 'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)', 'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '10px 12px', 'boxShadow': '0 10px 22px rgba(0,0,0,0.12)', 'maxHeight': '70vh', 'overflowY': 'auto'}, children=[
-        html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center', 'marginBottom': '6px'}, children=[
-            html.Div("메모장 (구글 시트 연동)", style={
-                     'fontWeight': '800', 'fontSize': '1.0rem'}),
-            html.Button("닫기", id="memo-close-btn", n_clicks=0)
-        ]),
-        html.Div(style={'display': 'flex', 'gap': '6px', 'marginBottom': '8px', 'flexWrap': 'wrap'}, children=[
-            html.Button("타임스탬프", id="memo-timestamp-btn", n_clicks=0),
-            html.Button("저장", id="memo-save-btn", n_clicks=0,
-                        style={'background': '#2563eb', 'color': 'white', 'border': 'none'}),
-            html.Button("지우기", id="memo-clear-btn", n_clicks=0),
-            html.Div([
-                dcc.Clipboard(id="memo-clipboard",
-                              style={"display": "inline"}),
-                html.Button("클립보드 복사", id="memo-copy-btn", n_clicks=0),
+        html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}, children=[
+            html.H3("주간 비교 (오늘 기준 5영업일 vs 지난주 동요일)", style={
+                    'marginBottom': '8px', 'fontSize': '1.05rem'}),
+            dcc.Tabs(id="weekly-tabs-today", value="총발주부수", children=[
+                dcc.Tab(label="발주량", value="총발주부수"),
+                dcc.Tab(label="흑백 페이지", value="흑백페이지"),
+                dcc.Tab(label="컬러 페이지", value="컬러페이지"),
             ]),
+            dcc.Graph(id='weekly-chart-today', figure=go.Figure(),
+                      style={'height': '300px'}),
         ]),
-        dcc.Textarea(id='memo-text', style={'width': '100%',
-                     'height': '30vh', 'resize': 'vertical'}, spellCheck=False),
-        html.Div(style={'marginTop': '6px', 'textAlign': 'right',
-                 'color': '#888', 'fontSize': '0.8rem'}, id='memo-status')
-    ]),
 
-    html.Button("오늘 현황", id="fab-today-toggle", n_clicks=0, title="오른쪽 패널 열기/닫기", style={'position': 'fixed', 'right': '16px', 'bottom': '16px', 'borderRadius': '999px', 'padding': '12px 16px',
-                'fontWeight': '800', 'background': '#2563eb', 'color': 'white', 'border': 'none', 'boxShadow': '0 8px 18px rgba(0,0,0,0.18)', 'zIndex': 1100, 'cursor': 'pointer'}),
-    html.Button("메모장", id="fab-memo-toggle", n_clicks=0, title="메모장 열기/닫기", style={'position': 'fixed', 'left': '16px', 'bottom': '16px', 'borderRadius': '999px', 'padding': '12px 16px',
-                'fontWeight': '800', 'background': '#059669', 'color': 'white', 'border': 'none', 'boxShadow': '0 8px 18px rgba(0,0,0,0.18)', 'zIndex': 1100, 'cursor': 'pointer'}),
+        html.Details(open=False, children=[
+            html.Summary("월~금 고정 주간 비교 (클릭하여 열기)"),
+            html.Div(style={'display': 'flex', 'gap': '8px', 'alignItems': 'center', 'margin': '8px 0'}, children=[
+                html.Span("주차 선택:", style={'fontWeight': '600'}),
+                dcc.Dropdown(id='week-select-fixed', options=[
+                             {'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}], value='this_week', clearable=False, style={'width': '300px'}),
+            ]),
+            dcc.Tabs(id="weekly-tabs-fixed", value="총발주부수", children=[
+                dcc.Tab(label="발주량", value="총발주부수"),
+                dcc.Tab(label="흑백 페이지", value="흑백페이지"),
+                dcc.Tab(label="컬러 페이지", value="컬러페이지"),
+            ]),
+            dcc.Graph(id='weekly-chart-fixed', style={'height': '320px'})
+        ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}),
+
+        html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr', 'gap': '12px', 'marginBottom': '12px'}, children=[
+            html.Div([html.H3("월별 발주량 (1~12월, 2022~현재)", style={'marginBottom': '4px', 'fontSize': '1.05rem'}),
+                      dcc.Graph(id='months-1to12-chart', figure=go.Figure(), style={'height': '320px'})],
+                     style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}),
+        ]),
+
+        html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '0px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)'}, children=[
+            dcc.Tabs(id="metric-tabs", value="avg", children=[
+                dcc.Tab(label="일평균 발주량", value="avg"),
+                dcc.Tab(label="월 총 발주량", value="total"),
+                dcc.Tab(label="흑백 페이지", value="bw"),
+                dcc.Tab(label="컬러 페이지", value="color"),
+                dcc.Tab(label="연간 예측", value="forecast"),
+            ]),
+            html.Div(id="metric-tab-content", style={'padding': '8px 4px'})
+        ]),
+
+        html.Div(id='today-floating-panel'),
+
+        html.Div(id='memo-popup', style={'position': 'fixed', 'left': '16px', 'top': '80px', 'width': 'min(92vw, 360px)', 'zIndex': '1000', 'display': 'none', 'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)', 'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '10px 12px', 'boxShadow': '0 10px 22px rgba(0,0,0,0.12)', 'maxHeight': '70vh', 'overflowY': 'auto'}, children=[
+            html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center', 'marginBottom': '6px'}, children=[
+                html.Div("메모장 (구글 시트 연동)", style={
+                         'fontWeight': '800', 'fontSize': '1.0rem'}),
+                html.Button("닫기", id="memo-close-btn", n_clicks=0)
+            ]),
+            html.Div(style={'display': 'flex', 'gap': '6px', 'marginBottom': '8px', 'flexWrap': 'wrap'}, children=[
+                html.Button("타임스탬프", id="memo-timestamp-btn", n_clicks=0),
+                html.Button("저장", id="memo-save-btn", n_clicks=0,
+                            style={'background': '#2563eb', 'color': 'white', 'border': 'none'}),
+                html.Button("지우기", id="memo-clear-btn", n_clicks=0),
+                html.Div([
+                    dcc.Clipboard(id="memo-clipboard",
+                                  style={"display": "inline"}),
+                    html.Button("클립보드 복사", id="memo-copy-btn", n_clicks=0),
+                ]),
+            ]),
+            dcc.Textarea(
+                id='memo-text', style={'width': '100%', 'height': '30vh', 'resize': 'vertical'}, spellCheck=False),
+            html.Div(style={'marginTop': '6px', 'textAlign': 'right',
+                     'color': '#888', 'fontSize': '0.8rem'}, id='memo-status')
+        ]),
+
+        html.Button("오늘 현황", id="fab-today-toggle", n_clicks=0, title="오른쪽 패널 열기/닫기", style={'position': 'fixed', 'right': '16px', 'bottom': '16px', 'borderRadius': '999px', 'padding': '12px 16px',
+                    'fontWeight': '800', 'background': '#2563eb', 'color': 'white', 'border': 'none', 'boxShadow': '0 8px 18px rgba(0,0,0,0.18)', 'zIndex': 1100, 'cursor': 'pointer'}),
+        html.Button("메모장", id="fab-memo-toggle", n_clicks=0, title="메모장 열기/닫기", style={'position': 'fixed', 'left': '16px', 'bottom': '16px', 'borderRadius': '999px', 'padding': '12px 16px',
+                    'fontWeight': '800', 'background': '#059669', 'color': 'white', 'border': 'none', 'boxShadow': '0 8px 18px rgba(0,0,0,0.18)', 'zIndex': 1100, 'cursor': 'pointer'}),
+    ])
+
+
+# -----------------------------------------------------------------------------
+# 앱 전체 레이아웃 (라우팅)
+# -----------------------------------------------------------------------------
+app.layout = html.Div([
+    dcc.Location(id='url', refresh=False),
+    html.Div(id='page-content')
 ])
+
+
+@callback(Output('page-content', 'children'),
+          Input('url', 'pathname'))
+def display_page(pathname):
+    if pathname == '/billing':
+        return billing_page.create_layout()
+    else:
+        return create_main_dashboard_layout()
 
 # -----------------------------------------------------------------------------
 # 데이터 로딩/리프레시
@@ -966,16 +991,21 @@ def ensure_data_loaded():
         DATA["loaded"] = True
 
 
-@callback(Output('data-version', 'data'), Input('data-auto-refresh', 'n_intervals'), Input('manual-refresh', 'n_clicks'), State('data-version', 'data'), prevent_initial_call=False)
-def auto_or_manual_reload(_n, _clicks, ver):
-    ctx = dash.callback_context
-    if not ctx.triggered and ver is not None:
-        raise PreventUpdate
+@callback(
+    Output('data-version', 'data'),
+    Input('data-auto-refresh', 'n_intervals'),
+    Input('manual-refresh', 'n_clicks'),
+    State('data-version', 'data'),
+    prevent_initial_call=False
+)
+def auto_or_manual_reload(_auto_n, _manual_clicks, ver):
     try:
+        print("Reloading data...")
         DATA["loaded"] = False
         ensure_data_loaded()
         return (ver or 0) + 1
-    except Exception:
+    except Exception as e:
+        print(f"Data reload failed: {e}")
         raise PreventUpdate
 
 # -----------------------------------------------------------------------------
@@ -1116,14 +1146,6 @@ def copy_memo_to_clipboard(n_clicks, text):
 
 
 @callback(
-    Output('memo-storage', 'data'),
-    Input('init', 'n_intervals')
-)
-def load_memo_on_start(_):
-    return read_memo_from_gsheet()
-
-
-@callback(
     Output('memo-visible', 'data'),
     Input('fab-memo-toggle', 'n_clicks'),
     Input('memo-close-btn', 'n_clicks'),
@@ -1143,43 +1165,39 @@ def toggle_memo_visible(fab_clicks, close_clicks, visible):
     Output('memo-popup', 'style'),
     Output('memo-text', 'value'),
     Output('memo-status', 'children'),
-    Output('memo-storage', 'data', allow_duplicate=True),
     Input('memo-visible', 'data'),
     Input('memo-save-btn', 'n_clicks'),
     Input('memo-clear-btn', 'n_clicks'),
     State('memo-text', 'value'),
-    State('memo-storage', 'data'),
     prevent_initial_call=True
 )
-def memo_controller(visible, save_n, clear_n, text, stored_memo):
+def memo_controller(visible, save_n, clear_n, text):
     base_style = {'position': 'fixed', 'left': '16px', 'top': '80px', 'width': 'min(92vw, 360px)', 'zIndex': '1000', 'background': 'rgba(255,255,255,0.98)', 'backdropFilter': 'blur(2px)',
                   'border': '1px solid #edf2f7', 'borderRadius': '14px', 'padding': '10px 12px', 'boxShadow': '0 10px 22px rgba(0,0,0,0.12)', 'maxHeight': '70vh', 'overflowY': 'auto'}
-
     display_style = {'display': 'block' if visible else 'none'}
+
     ctx = dash.callback_context
     triggered_id = ctx.triggered_id
 
+    if triggered_id == 'memo-visible' and visible:
+        content_from_sheet = read_memo_from_gsheet()
+        return {**base_style, **display_style}, content_from_sheet, "로드 완료"
+
     if triggered_id == 'memo-save-btn':
         success = write_memo_to_gsheet(text or "")
-        if success:
-            return {**base_style, **display_style}, text, "저장 완료", text
-        else:
-            return {**base_style, **display_style}, text, "오류: 저장 실패", stored_memo
+        status = "저장 완료" if success else "오류: 저장 실패"
+        return {**base_style, **display_style}, text, status
 
     if triggered_id == 'memo-clear-btn':
         success = write_memo_to_gsheet("")
-        if success:
-            return {**base_style, **display_style}, "", "삭제 완료", ""
-        else:
-            return {**base_style, **display_style}, text, "오류: 삭제 실패", stored_memo
+        status = "삭제 완료" if success else "오류: 삭제 실패"
+        new_text = "" if success else text
+        return {**base_style, **display_style}, new_text, status
 
-    if triggered_id == 'memo-visible':
-        if visible:
-            return {**base_style, **display_style}, stored_memo, "", dash.no_update
-        else:
-            return {**base_style, **display_style}, dash.no_update, "", dash.no_update
+    if not visible:
+        return {**base_style, 'display': 'none'}, dash.no_update, ""
 
-    raise PreventUpdate
+    return {**base_style, **display_style}, dash.no_update, ""
 
 
 # -----------------------------------------------------------------------------
