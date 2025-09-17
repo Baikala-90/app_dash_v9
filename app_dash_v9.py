@@ -25,8 +25,8 @@ KST = pytz.timezone('Asia/Seoul')
 
 # ===== 설정 =====
 AUTO_REFRESH_MIN = int(os.getenv("AUTO_REFRESH_MIN", "15"))
-MOVAVG_MONTHS = int(os.getenv("MOVAVG_MONTHS", "3"))
-MA_MIN_PROGRESS = float(os.getenv("MA_MIN_PROGRESS", "0.10"))
+HIGHLIGHT_THRESHOLD = float(
+    os.getenv("HIGHLIGHT_THRESHOLD", "0.30"))  # 30% 변동 시 하이라이트
 SPREADSHEET_URL = os.getenv("SPREADSHEET_URL", "").strip()
 
 # -----------------------------------------------------------------------------
@@ -116,7 +116,8 @@ def load_data_from_gsheet():
     monthly_name = os.getenv("MONTHLY_SHEET_NAME", "월별 발주량").strip()
 
     ws_d = sh.worksheet(daily_name)
-    vals_d = ws_d.get_all_values()
+    # value_render_option='FORMATTED_VALUE'는 셀에 표시된 텍스트를 그대로 가져옵니다.
+    vals_d = ws_d.get_all_values(value_render_option='FORMATTED_VALUE')
     di = int(os.getenv("DAILY_HEADER_INDEX", "0"))
     headers_d = [norm(h) for h in vals_d[di]]
     df_daily_raw = pd.DataFrame(vals_d[di+1:], columns=headers_d)
@@ -138,7 +139,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=['날짜', 'date_only', '연도', '월',
                                      '총발주종수', '총발주부수', '흑백페이지', '컬러페이지',
-                                     '예상제본시간', '최종출고', '출고부수', '비고'])
+                                     '예상제본시간', '최종출고', '출고부수', '비고', '예상제본시간_시간'])
     d = df.copy()
     d = d.rename(columns={c: norm(c) for c in d.columns})
     col_date = next((c for c in d.columns if c in [
@@ -187,7 +188,9 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
         d = d.loc[~blanks].copy()
 
     def to_num(series):
-        return pd.to_numeric(series.astype(str).str.replace(',', '', regex=False), errors='coerce').fillna(0).astype(int)
+        # 쉼표(,)가 포함된 문자열을 숫자로 변환
+        s = series.astype(str).str.replace(',', '', regex=False)
+        return pd.to_numeric(s, errors='coerce').fillna(0)
 
     d['총발주종수'] = to_num(d[col_cnt]) if col_cnt and col_cnt in d.columns else 0
     d['총발주부수'] = to_num(
@@ -206,6 +209,14 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
         return '-'
 
     d['예상제본시간'] = as_text(col_bind)
+
+    # --- 예상 제본 시간 계산 로직 변경 ---
+    # 수식을 직접 파이썬 코드로 계산 (결과는 시간 단위)
+    # 초 = 837.284 + (9.249 * 총발주종수) + (11.364 * 총발주부수)
+    # 시간 = 초 / 3600
+    seconds = 837.284 + (9.249 * d['총발주종수']) + (11.364 * d['총발주부수'])
+    d['예상제본시간_시간'] = (seconds / 3600).round(2)
+
     d['최종출고'] = as_text(col_shipt)
     d['비고'] = as_text(col_remarks)
 
@@ -215,7 +226,7 @@ def cleanse_daily(df: pd.DataFrame) -> pd.DataFrame:
 
     return d[['날짜', 'date_only', '연도', '월',
               '총발주종수', '총발주부수', '흑백페이지', '컬러페이지',
-              '예상제본시간', '최종출고', '출고부수', '비고']]
+              '예상제본시간', '예상제본시간_시간', '최종출고', '출고부수', '비고']]
 
 
 def cleanse_monthly(df: pd.DataFrame) -> pd.DataFrame:
@@ -363,25 +374,33 @@ def week_options_from_df(df_daily: pd.DataFrame):
     return [{'label': '오늘 기준 (최근 5영업일)', 'value': 'this_week'}] + opts
 
 
-def figure_weekly_today_based(df_daily: pd.DataFrame, value_col: str = '총발주부수') -> go.Figure:
-    now = datetime.now(KST)
-    this_week_dates = last_5_business_days_upto_today(now)
-    last_week_dates = [d - timedelta(days=7) for d in this_week_dates]
+def figure_weekly(df_daily: pd.DataFrame, week_dates: list, value_col: str = '총발주부수', title_prefix=""):
+    last_week_dates = [d - timedelta(days=7) for d in week_dates]
 
-    metric_map = {'총발주부수': '발주량', '총발주종수': '발주 종수',
-                  '흑백페이지': '흑백 페이지', '컬러페이지': '컬러 페이지'}
-    unit_map = {'총발주부수': '부', '총발주종수': '종', '흑백페이지': '페이지', '컬러페이지': '페이지'}
+    metric_map = {'총발주부수': '발주량', '총발주종수': '발주 종수', '흑백페이지': '흑백 페이지',
+                  '컬러페이지': '컬러 페이지', '예상제본시간_시간': '예상 제본 시간'}
+    unit_map = {'총발주부수': '부', '총발주종수': '종', '흑백페이지': '페이지',
+                '컬러페이지': '페이지', '예상제본시간_시간': '시간'}
 
     unit = unit_map.get(value_col, '')
     metric_name = metric_map.get(value_col, '값')
 
     m = df_daily.set_index('date_only')[value_col].to_dict(
     ) if not df_daily.empty and value_col in df_daily.columns else {}
-    y_this = [m.get(d, 0) for d in this_week_dates]
+
+    y_this = [m.get(d, 0) for d in week_dates]
     y_last = [m.get(d, 0) for d in last_week_dates]
-    x_week = [WEEKDAY_KR[pd.Timestamp(d).weekday()] for d in this_week_dates]
-    this_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
-                      for d in this_week_dates]
+
+    # 4주 이동평균 계산
+    y_ma4 = []
+    for day in week_dates:
+        avg_dates = [day - timedelta(weeks=i)
+                     for i in range(1, 5)]  # 1,2,3,4주 전
+        vals = [m.get(d, 0) for d in avg_dates]
+        y_ma4.append(np.mean(vals) if vals else 0)
+
+    x_week = [WEEKDAY_KR[pd.Timestamp(d).weekday()] for d in week_dates]
+    this_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d') for d in week_dates]
     last_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
                       for d in last_week_dates]
 
@@ -389,23 +408,67 @@ def figure_weekly_today_based(df_daily: pd.DataFrame, value_col: str = '총발�
     avg_last = np.mean(y_last) if y_last else 0
 
     fig = go.Figure()
+
+    # 4주 이동평균선
+    fig.add_trace(go.Scatter(
+        x=x_week, y=y_ma4, mode='lines', name='4주 이동평균',
+        line=dict(width=2, dash='longdash', color='rgba(150, 150, 150, 0.7)'),
+        hovertemplate="4주 평균: %{y:,.1f}"+unit+"<extra></extra>"
+    ))
+    # 지난 주
     fig.add_trace(go.Scatter(
         x=x_week, y=y_last, mode='lines+markers+text', name=f'지난 주 (평균: {avg_last:,.1f}{unit})',
         line=dict(width=2, dash='dot'), customdata=last_dates_str,
-        hovertemplate="%{customdata}<br>지난 주: %{y:,}"+unit+"<extra></extra>",
-        text=[f"{v:,}" if v else "" for v in y_last], textposition='top center', textfont={'size': 11}
+        hovertemplate="%{customdata}<br>지난 주: %{y:,.1f}" +
+        unit+"<extra></extra>",
+        text=[f"{v:,.1f}" if v else "" for v in y_last], textposition='top center', textfont={'size': 11}
     ))
+
+    # 변동사항 하이라이트 준비
+    marker_colors = ['#1f77b4'] * len(y_this)  # 기본색
+    marker_sizes = [8] * len(y_this)
+    annotations = []
+
+    for i, (this_val, last_val) in enumerate(zip(y_this, y_last)):
+        if last_val > 0:
+            change = (this_val - last_val) / last_val
+            if abs(change) >= HIGHLIGHT_THRESHOLD:
+                marker_colors[i] = '#d62728'  # 강조색
+                marker_sizes[i] = 12
+                sign = '+' if change > 0 else ''
+                annotations.append(dict(
+                    x=x_week[i], y=this_val,
+                    text=f"{sign}{change:.0%}",
+                    showarrow=True, arrowhead=1, ax=0, ay=-25,
+                    font=dict(color="white", size=10),
+                    bgcolor="#d62728", bordercolor="white", borderwidth=1,
+                ))
+
+    # 이번 주
     fig.add_trace(go.Scatter(
         x=x_week, y=y_this, mode='lines+markers+text', name=f'이번 주 (평균: {avg_this:,.1f}{unit})',
-        line=dict(width=3), customdata=this_dates_str,
-        hovertemplate="%{customdata}<br>이번 주: %{y:,}"+unit+"<extra></extra>",
-        text=[f"{v:,}" if v else "" for v in y_this], textposition='top center', textfont={'size': 11}
+        line=dict(width=3), marker=dict(color=marker_colors, size=marker_sizes, line=dict(width=1, color='white')),
+        customdata=this_dates_str,
+        hovertemplate="%{customdata}<br>이번 주: %{y:,.1f}" +
+        unit+"<extra></extra>",
+        text=[f"{v:,.1f}" if v else "" for v in y_this], textposition='top center', textfont={'size': 11}
     ))
-    fig.update_layout(title=f'주간 {metric_name} 비교 (기준일: {now.strftime("%Y-%m-%d")})',
-                      xaxis_title='', yaxis_title=f'{metric_name} ({unit})', template='plotly_white', height=280,
-                      margin=dict(l=20, r=20, t=40, b=20),
-                      legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
+
+    fig.update_layout(
+        title=f'{title_prefix}주간 {metric_name} 비교',
+        xaxis_title='', yaxis_title=f'{metric_name} ({unit})', template='plotly_white', height=320,
+        margin=dict(l=20, r=20, t=40, b=20),
+        legend=dict(orientation='h', x=1, xanchor='right', y=1.2),
+        annotations=annotations
+    )
     return fig
+
+
+def figure_weekly_today_based(df_daily: pd.DataFrame, value_col: str = '총발주부수') -> go.Figure:
+    now = datetime.now(KST)
+    week_dates = last_5_business_days_upto_today(now)
+    title_prefix = f'(기준일: {now.strftime("%Y-%m-%d")}) '
+    return figure_weekly(df_daily, week_dates, value_col, title_prefix)
 
 
 def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None, value_col: str = '총발주부수') -> go.Figure:
@@ -417,47 +480,9 @@ def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None, 
     else:
         base_mon = monday(datetime.now(KST).date())
 
-    week_days = [base_mon + timedelta(days=i) for i in range(5)]
-    prev_week_days = [d - timedelta(days=7) for d in week_days]
-
-    metric_map = {'총발주부수': '발주량', '총발주종수': '발주 종수',
-                  '흑백페이지': '흑백 페이지', '컬러페이지': '컬러 페이지'}
-    unit_map = {'총발주부수': '부', '총발주종수': '종', '흑백페이지': '페이지', '컬러페이지': '페이지'}
-
-    unit = unit_map.get(value_col, '')
-    metric_name = metric_map.get(value_col, '값')
-
-    m = df_daily.set_index('date_only')[value_col].to_dict(
-    ) if not df_daily.empty and value_col in df_daily.columns else {}
-    y_this = [m.get(d, 0) for d in week_days]
-    y_last = [m.get(d, 0) for d in prev_week_days]
-    x_week = [WEEKDAY_KR[pd.Timestamp(d).weekday()] for d in week_days]
-    this_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d') for d in week_days]
-    last_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
-                      for d in prev_week_days]
-
-    avg_this = np.mean(y_this) if y_this else 0
-    avg_last = np.mean(y_last) if y_last else 0
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=x_week, y=y_last, mode='lines+markers+text', name=f'지난 주 (평균: {avg_last:,.1f}{unit})',
-        line=dict(width=2, dash='dot'), customdata=last_dates_str,
-        hovertemplate="%{customdata}<br>지난 주: %{y:,}"+unit+"<extra></extra>",
-        text=[f"{v:,}" if v else "" for v in y_last], textposition='top center', textfont={'size': 11}
-    ))
-    fig.add_trace(go.Scatter(
-        x=x_week, y=y_this, mode='lines+markers+text', name=f'이번 주 (평균: {avg_this:,.1f}{unit})',
-        line=dict(width=3), customdata=this_dates_str,
-        hovertemplate="%{customdata}<br>이번 주: %{y:,}"+unit+"<extra></extra>",
-        text=[f"{v:,}" if v else "" for v in y_this], textposition='top center', textfont={'size': 11}
-    ))
-    title_range = f"{week_days[0].strftime('%Y-%m-%d')} ~ {week_days[-1].strftime('%Y-%m-%d')}"
-    fig.update_layout(title=f'주간 {metric_name} 비교 (월~금 고정): {title_range}',
-                      xaxis_title='', yaxis_title=f'{metric_name} ({unit})', template='plotly_white', height=300,
-                      margin=dict(l=20, r=20, t=40, b=20),
-                      legend=dict(orientation='h', x=1, xanchor='right', y=1.1))
-    return fig
+    week_dates = [base_mon + timedelta(days=i) for i in range(5)]
+    title_prefix = f'({week_dates[0].strftime("%m-%d")} ~ {week_dates[-1].strftime("%m-%d")}) '
+    return figure_weekly(df_daily, week_dates, value_col, title_prefix)
 
 
 def figure_months_1to12(df_monthly: pd.DataFrame, start_year=2022, current_year=None) -> go.Figure:
@@ -596,6 +621,65 @@ def compute_progress_advanced(df_daily: pd.DataFrame, df_monthly: pd.DataFrame, 
 # -----------------------------------------------------------------------------
 
 
+def build_weekly_summary_panel(df_daily: pd.DataFrame):
+    if df_daily.empty:
+        return html.Div("주간 요약 데이터를 불러올 수 없습니다.")
+
+    now = datetime.now(KST)
+    week_dates = last_5_business_days_upto_today(now)
+    last_week_dates = [d - timedelta(days=7) for d in week_dates]
+
+    df_map = df_daily.set_index('date_only')
+
+    this_week_data = df_map.loc[df_map.index.isin(week_dates)]
+    last_week_data = df_map.loc[df_map.index.isin(last_week_dates)]
+
+    if this_week_data.empty:
+        return html.Div("이번 주 데이터가 없습니다.")
+
+    this_total = this_week_data['총발주부수'].sum()
+    last_total = last_week_data['총발주부수'].sum()
+
+    wow_change = (this_total - last_total) / \
+        last_total if last_total > 0 else 0
+    wow_str = f"{wow_change:+.1%}"
+    wow_color = "#2b8a3e" if wow_change >= 0 else "#d9480f"
+
+    this_avg = this_week_data['총발주부수'].mean()
+
+    peak_day_row = this_week_data.loc[this_week_data['총발주부수'].idxmax()]
+    peak_day_val = peak_day_row['총발주부수']
+    peak_day_date = peak_day_row.name
+    peak_day_str = f"{WEEKDAY_KR[peak_day_date.weekday()]}요일"
+
+    style_p = {'margin': '2px 0', 'fontSize': '0.9rem'}
+    style_strong = {'margin': '0 4px'}
+
+    summary_text = [
+        html.P([
+            "금주 총 발주량은 ",
+            html.Strong(f"{this_total:,.0f}부", style=style_strong),
+            "로, 지난주 대비 ",
+            html.Strong(f"{wow_str}", style={
+                        **style_strong, 'color': wow_color}),
+            " 변동했습니다."
+        ], style=style_p),
+        html.P([
+            "일 평균 ",
+            html.Strong(f"{this_avg:,.1f}부", style=style_strong),
+            "를 기록했으며, ",
+            html.Strong(f"{peak_day_str}({peak_day_val:,.0f}부)",
+                        style=style_strong),
+            "에 가장 많은 발주가 있었습니다."
+        ], style=style_p)
+    ]
+
+    return html.Div(summary_text, style={
+        'background': '#f8f9fa', 'borderRadius': '8px', 'padding': '10px 14px',
+        'border': '1px solid #e9ecef', 'marginBottom': '10px'
+    })
+
+
 def badge(text, color="#2b8a3e", tip=None):
     return html.Span(
         text,
@@ -697,27 +781,23 @@ def build_today_panel(df_daily: pd.DataFrame):
         else:
             r = row.iloc[0]
 
-            def fmt_int(x):
-                try:
-                    return f"{int(x):,}"
-                except:
-                    return "0"
-
             grid = html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr 1fr', 'rowGap': '6px', 'columnGap': '8px'}, children=[
                 html.Div("총 발주 종수", style={'color': '#666'}), html.Div(
-                    fmt_int(r.get('총발주종수', 0)), style={'textAlign': 'right', 'fontWeight': '700'}),
-                html.Div("총 발주 부수", style={'color': '#666'}), html.Div(fmt_int(
-                    r.get('총발주부수', 0)),   style={'textAlign': 'right', 'fontWeight': '700'}),
-                html.Div("흑백 페이지",  style={'color': '#666'}), html.Div(fmt_int(
-                    r.get('흑백페이지', 0)),    style={'textAlign': 'right', 'fontWeight': '700'}),
+                    f"{int(r.get('총발주종수', 0)):,}", style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("총 발주 부수", style={'color': '#666'}), html.Div(
+                    f"{int(r.get('총발주부수', 0)):,}",   style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("흑백 페이지",  style={'color': '#666'}), html.Div(
+                    f"{int(r.get('흑백페이지', 0)):,}",    style={'textAlign': 'right', 'fontWeight': '700'}),
                 html.Div("컬러 페이지",  style={'color': '#666'}), html.Div(
-                    fmt_int(r.get('컬러페이지', 0)), style={'textAlign': 'right', 'fontWeight': '700'}),
+                    f"{int(r.get('컬러페이지', 0)):,}", style={'textAlign': 'right', 'fontWeight': '700'}),
+                # --- 오늘 현황 패널 표시 방식 변경 ---
+                # 시트의 표시된 텍스트를 그대로 사용
                 html.Div("예상 제본 시간", style={'color': '#666'}), html.Div(
                     (str(r.get('예상제본시간', '-')) or '-'),  style={'textAlign': 'right', 'fontWeight': '700'}),
                 html.Div("최종 출고",    style={'color': '#666'}), html.Div(
                     (str(r.get('최종출고', '-')) or '-'),   style={'textAlign': 'right', 'fontWeight': '700'}),
-                html.Div("출고 부수",    style={'color': '#666'}), html.Div(fmt_int(
-                    r.get('출고부수', 0)),    style={'textAlign': 'right', 'fontWeight': '700'}),
+                html.Div("출고 부수",    style={'color': '#666'}), html.Div(
+                    f"{int(r.get('출고부수', 0)):,}",    style={'textAlign': 'right', 'fontWeight': '700'}),
             ])
 
             remarks = (str(r.get('비고', '-')) or '-')
@@ -878,16 +958,18 @@ def create_main_dashboard_layout():
         ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '16px'}),
 
         html.Div(style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}, children=[
-            html.H3("주간 비교 (오늘 기준 5영업일 vs 지난주 동요일)", style={
+            html.H3("주간 비교 분석", style={
                     'marginBottom': '8px', 'fontSize': '1.05rem'}),
+            html.Div(id='weekly-summary-container'),
             dcc.Tabs(id="weekly-tabs-today", value="총발주부수", children=[
                 dcc.Tab(label="발주량", value="총발주부수"),
                 dcc.Tab(label="발주 종수", value="총발주종수"),
+                dcc.Tab(label="예상 제본 시간", value="예상제본시간_시간"),
                 dcc.Tab(label="흑백 페이지", value="흑백페이지"),
                 dcc.Tab(label="컬러 페이지", value="컬러페이지"),
             ]),
             dcc.Graph(id='weekly-chart-today', figure=go.Figure(),
-                      style={'height': '300px'}),
+                      style={'height': '340px'}),
         ]),
 
         html.Details(open=False, children=[
@@ -900,10 +982,11 @@ def create_main_dashboard_layout():
             dcc.Tabs(id="weekly-tabs-fixed", value="총발주부수", children=[
                 dcc.Tab(label="발주량", value="총발주부수"),
                 dcc.Tab(label="발주 종수", value="총발주종수"),
+                dcc.Tab(label="예상 제본 시간", value="예상제본시간_시간"),
                 dcc.Tab(label="흑백 페이지", value="흑백페이지"),
                 dcc.Tab(label="컬러 페이지", value="컬러페이지"),
             ]),
-            dcc.Graph(id='weekly-chart-fixed', style={'height': '320px'})
+            dcc.Graph(id='weekly-chart-fixed', style={'height': '340px'})
         ], style={'background': 'white', 'borderRadius': '12px', 'padding': '14px', 'boxShadow': '0 4px 14px rgba(0,0,0,0.08)', 'marginBottom': '12px'}),
 
         html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr', 'gap': '12px', 'marginBottom': '12px'}, children=[
@@ -1061,13 +1144,19 @@ def update_kpis(selected_year, _ver):
         stamp = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
         return kpi_layout, prev_tbl, f"업데이트: {stamp}"
     except Exception as e:
-        return html.Div("KPI 계산 오류"), html.Div(f"오류: {e}"), ""
+        return html.Div(f"KPI 계산 오류: {e}"), html.Div(f"오류: {e}"), ""
 
 
 @callback(Output('week-select-fixed', 'options'), Output('week-select-fixed', 'value'), Input('data-version', 'data'))
 def refresh_week_options(_ver):
     ensure_data_loaded()
     return DATA["week_options"], 'this_week'
+
+
+@callback(Output('weekly-summary-container', 'children'), Input('data-version', 'data'))
+def update_weekly_summary(_ver):
+    ensure_data_loaded()
+    return build_weekly_summary_panel(DATA["daily"])
 
 
 @callback(Output('weekly-chart-today', 'figure'), Input('weekly-tabs-today', 'value'), Input('data-version', 'data'))
