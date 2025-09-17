@@ -2,6 +2,7 @@ import os
 import re
 import calendar
 from datetime import datetime, timedelta, date
+import numpy as np
 
 import pandas as pd
 import gspread
@@ -26,6 +27,7 @@ KST = pytz.timezone('Asia/Seoul')
 AUTO_REFRESH_MIN = int(os.getenv("AUTO_REFRESH_MIN", "15"))
 MOVAVG_MONTHS = int(os.getenv("MOVAVG_MONTHS", "3"))
 MA_MIN_PROGRESS = float(os.getenv("MA_MIN_PROGRESS", "0.10"))
+SPREADSHEET_URL = os.getenv("SPREADSHEET_URL", "").strip()
 
 # -----------------------------------------------------------------------------
 # 공통 유틸
@@ -61,10 +63,9 @@ def open_sheet():
     creds = ServiceAccountCredentials.from_json_keyfile_name(creds_file, scope)
     client = gspread.authorize(creds)
 
-    url = os.getenv("SPREADSHEET_URL", "").strip()
-    if not url:
+    if not SPREADSHEET_URL:
         raise EnvironmentError("SPREADSHEET_URL이 .env/환경변수에 없습니다.")
-    return client.open_by_url(url)
+    return client.open_by_url(SPREADSHEET_URL)
 
 
 # -----------------------------------------------------------------------------
@@ -367,8 +368,11 @@ def figure_weekly_today_based(df_daily: pd.DataFrame, value_col: str = '총발�
     this_week_dates = last_5_business_days_upto_today(now)
     last_week_dates = [d - timedelta(days=7) for d in this_week_dates]
 
-    metric_map = {'총발주부수': '발주량', '흑백페이지': '흑백 페이지', '컬러페이지': '컬러 페이지'}
-    unit = '부' if value_col == '총발주부수' else '페이지'
+    metric_map = {'총발주부수': '발주량', '총발주종수': '발주 종수',
+                  '흑백페이지': '흑백 페이지', '컬러페이지': '컬러 페이지'}
+    unit_map = {'총발주부수': '부', '총발주종수': '종', '흑백페이지': '페이지', '컬러페이지': '페이지'}
+
+    unit = unit_map.get(value_col, '')
     metric_name = metric_map.get(value_col, '값')
 
     m = df_daily.set_index('date_only')[value_col].to_dict(
@@ -381,15 +385,18 @@ def figure_weekly_today_based(df_daily: pd.DataFrame, value_col: str = '총발�
     last_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
                       for d in last_week_dates]
 
+    avg_this = np.mean(y_this) if y_this else 0
+    avg_last = np.mean(y_last) if y_last else 0
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=x_week, y=y_last, mode='lines+markers+text', name='지난 주',
+        x=x_week, y=y_last, mode='lines+markers+text', name=f'지난 주 (평균: {avg_last:,.1f}{unit})',
         line=dict(width=2, dash='dot'), customdata=last_dates_str,
         hovertemplate="%{customdata}<br>지난 주: %{y:,}"+unit+"<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_last], textposition='top center', textfont={'size': 11}
     ))
     fig.add_trace(go.Scatter(
-        x=x_week, y=y_this, mode='lines+markers+text', name='이번 주',
+        x=x_week, y=y_this, mode='lines+markers+text', name=f'이번 주 (평균: {avg_this:,.1f}{unit})',
         line=dict(width=3), customdata=this_dates_str,
         hovertemplate="%{customdata}<br>이번 주: %{y:,}"+unit+"<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_this], textposition='top center', textfont={'size': 11}
@@ -413,8 +420,11 @@ def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None, 
     week_days = [base_mon + timedelta(days=i) for i in range(5)]
     prev_week_days = [d - timedelta(days=7) for d in week_days]
 
-    metric_map = {'총발주부수': '발주량', '흑백페이지': '흑백 페이지', '컬러페이지': '컬러 페이지'}
-    unit = '부' if value_col == '총발주부수' else '페이지'
+    metric_map = {'총발주부수': '발주량', '총발주종수': '발주 종수',
+                  '흑백페이지': '흑백 페이지', '컬러페이지': '컬러 페이지'}
+    unit_map = {'총발주부수': '부', '총발주종수': '종', '흑백페이지': '페이지', '컬러페이지': '페이지'}
+
+    unit = unit_map.get(value_col, '')
     metric_name = metric_map.get(value_col, '값')
 
     m = df_daily.set_index('date_only')[value_col].to_dict(
@@ -426,15 +436,18 @@ def figure_weekly_fixed_mon_fri(df_daily: pd.DataFrame, monday_str: str = None, 
     last_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d')
                       for d in prev_week_days]
 
+    avg_this = np.mean(y_this) if y_this else 0
+    avg_last = np.mean(y_last) if y_last else 0
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=x_week, y=y_last, mode='lines+markers+text', name='지난 주',
+        x=x_week, y=y_last, mode='lines+markers+text', name=f'지난 주 (평균: {avg_last:,.1f}{unit})',
         line=dict(width=2, dash='dot'), customdata=last_dates_str,
         hovertemplate="%{customdata}<br>지난 주: %{y:,}"+unit+"<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_last], textposition='top center', textfont={'size': 11}
     ))
     fig.add_trace(go.Scatter(
-        x=x_week, y=y_this, mode='lines+markers+text', name='이번 주',
+        x=x_week, y=y_this, mode='lines+markers+text', name=f'이번 주 (평균: {avg_this:,.1f}{unit})',
         line=dict(width=3), customdata=this_dates_str,
         hovertemplate="%{customdata}<br>이번 주: %{y:,}"+unit+"<extra></extra>",
         text=[f"{v:,}" if v else "" for v in y_this], textposition='top center', textfont={'size': 11}
@@ -846,9 +859,11 @@ def create_main_dashboard_layout():
         html.Div(style={'display': 'flex', 'gap': '10px', 'justifyContent': 'center', 'alignItems': 'center', 'marginBottom': '8px', 'flexWrap': 'wrap'}, children=[
             html.Span("KPI 연도 선택:", style={'fontWeight': '600'}),
             dcc.Dropdown(id='year-select', options=[{'label': f'{CURRENT_YEAR}년', 'value': CURRENT_YEAR}],
-                         value=CURRENT_YEAR, clearable=False, style={'width': '220px'}),
+                         value=CURRENT_YEAR, clearable=False, style={'width': '180px'}),
             html.Button("데이터 새로고침", id="manual-refresh", n_clicks=0, title="구글 시트에서 다시 불러오기", style={
-                        'borderRadius': '999px', 'padding': '8px 12px', 'fontWeight': '700', 'border': '1px solid #e2e8f0', 'background': '#2563eb', 'color': 'white', 'cursor': 'pointer'}),
+                        'borderRadius': '8px', 'padding': '8px 12px', 'fontWeight': '700', 'border': '1px solid #e2e8f0', 'background': '#2563eb', 'color': 'white', 'cursor': 'pointer'}),
+            html.A(html.Button("원본 시트 바로가기"), href=SPREADSHEET_URL or "#", target="_blank",
+                   style={'textDecoration': 'none'}),
             dcc.Link(html.Button('청구액 페이지'), href='/billing',
                      style={'textDecoration': 'none'}),
             html.Div(id='kpi-refresh-status',
@@ -867,6 +882,7 @@ def create_main_dashboard_layout():
                     'marginBottom': '8px', 'fontSize': '1.05rem'}),
             dcc.Tabs(id="weekly-tabs-today", value="총발주부수", children=[
                 dcc.Tab(label="발주량", value="총발주부수"),
+                dcc.Tab(label="발주 종수", value="총발주종수"),
                 dcc.Tab(label="흑백 페이지", value="흑백페이지"),
                 dcc.Tab(label="컬러 페이지", value="컬러페이지"),
             ]),
@@ -883,6 +899,7 @@ def create_main_dashboard_layout():
             ]),
             dcc.Tabs(id="weekly-tabs-fixed", value="총발주부수", children=[
                 dcc.Tab(label="발주량", value="총발주부수"),
+                dcc.Tab(label="발주 종수", value="총발주종수"),
                 dcc.Tab(label="흑백 페이지", value="흑백페이지"),
                 dcc.Tab(label="컬러 페이지", value="컬러페이지"),
             ]),
